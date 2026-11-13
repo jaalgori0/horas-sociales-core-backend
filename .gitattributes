@@ -1,0 +1,4 @@
+# Forzar LF: el checksum de las migraciones y los scripts de Docker dependen de ello.
+* text=auto eol=lf
+*.sql text eol=lf
+*.sh  text eol=lf

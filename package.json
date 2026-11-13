@@ -1,0 +1,51 @@
+{
+  "name": "horas-sociales-core-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend unificado de Horas Sociales UCA y Aplicativo de Citas sobre una única base de datos PostgreSQL.",
+  "type": "module",
+  "main": "dist/main.js",
+  "packageManager": "pnpm@10.33.2",
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": ">=9"
+  },
+  "scripts": {
+    "dev": "tsx watch --clear-screen=false src/main.ts",
+    "build": "pnpm run clean && tsc -p tsconfig.json",
+    "start": "node --enable-source-maps dist/main.js",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "db:migrate": "tsx src/database/migrate.ts up",
+    "db:migrate:status": "tsx src/database/migrate.ts status",
+    "db:migrate:new": "tsx src/database/migrate.ts new",
+    "db:migrate:prod": "node dist/database/migrate.js up",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:reset": "docker compose down -v && docker compose up -d",
+    "docker:logs": "docker compose logs -f postgres",
+    "docker:psql": "docker compose exec postgres sh -c 'psql -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\"'"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "helmet": "^8.0.0",
+    "pg": "^8.13.1",
+    "pg-hstore": "^2.3.4",
+    "sequelize": "^6.37.5",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^20.17.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

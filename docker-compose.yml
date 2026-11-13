@@ -1,0 +1,38 @@
+# PostgreSQL de desarrollo para horas-sociales-core-backend.
+#
+# - Lee credenciales del archivo `.env` (cp .env.example .env).
+# - En el PRIMER arranque (volumen vacío) ejecuta automáticamente
+#   001_init_unified_schema.sql. Ese script se registra a sí mismo en
+#   `schema_migrations`, por lo que `pnpm db:migrate` lo reconoce como aplicado.
+# - Las migraciones posteriores (002_..., 003_...) NO se montan aquí:
+#   se aplican siempre con `pnpm db:migrate`.
+
+name: hs-core
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hs-core-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-horas_sociales}
+      POSTGRES_USER: ${DB_USER:-horas_sociales}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Defina DB_PASSWORD en el archivo .env}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C.UTF-8"
+      TZ: America/El_Salvador
+      PGTZ: America/El_Salvador
+    ports:
+      - "${DB_PORT:-5434}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./src/database/migrations/001_init_unified_schema.sql:/docker-entrypoint-initdb.d/001_init_unified_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  pgdata:
+    name: hs-core-pgdata

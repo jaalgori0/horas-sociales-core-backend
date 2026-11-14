@@ -20,6 +20,10 @@
     "db:migrate:status": "tsx src/database/migrate.ts status",
     "db:migrate:new": "tsx src/database/migrate.ts new",
     "db:migrate:prod": "node dist/database/migrate.js up",
+    "etl:staging:init": "tsx src/etl/staging.ts init",
+    "etl:staging:load": "tsx src/etl/staging.ts load",
+    "etl:staging:drop": "tsx src/etl/staging.ts drop",
+    "etl:transform": "tsx src/etl/transform.ts",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
     "docker:reset": "docker compose down -v && docker compose up -d",
@@ -31,9 +35,11 @@
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
     "helmet": "^8.0.0",
+    "pdfjs-dist": "4.10.38",
     "pg": "^8.13.1",
     "pg-hstore": "^2.3.4",
     "sequelize": "^6.37.5",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "^3.24.2"
   },
   "devDependencies": {

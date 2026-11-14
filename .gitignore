@@ -32,3 +32,6 @@ Thumbs.db
 
 # Datos locales de Docker (si se usa bind mount en lugar de volumen)
 .docker-data/
+
+# Archivos fuente del ETL (contienen datos personales: nunca versionar)
+data/

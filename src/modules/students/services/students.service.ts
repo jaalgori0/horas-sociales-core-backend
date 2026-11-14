@@ -13,8 +13,9 @@ import type { CreateStudentInput, ListStudentsQuery, UpdateStudentInput } from '
 export interface StudentDTO {
   id: string;
   carnet: string;
-  nombres: string;
-  apellidos: string;
+  /** null en históricos del CSS hasta que se completen (ver migración 002). */
+  nombres: string | null;
+  apellidos: string | null;
   nombreCompleto: string;
   correoInstitucional: string;
   emailPersonal: string | null;
@@ -202,6 +203,14 @@ export const studentsService = {
 
     if (data.careerId && data.careerId !== student.careerId) {
       await assertCareerExists(data.careerId);
+    }
+
+    // Histórico del CSS (sin nombres/apellidos): se completan los dos a la vez o ninguno.
+    if (student.nombres === null && (data.nombres === undefined) !== (data.apellidos === undefined)) {
+      throw AppError.unprocessable(
+        'Este estudiante proviene del histórico y aún no tiene nombres/apellidos separados: envíe ambos campos juntos.',
+        { nombreCompleto: student.nombreCompleto },
+      );
     }
 
     await student.update({ ...compact(data), ...protectDui(dui) });

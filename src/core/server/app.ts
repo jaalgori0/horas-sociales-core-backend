@@ -26,7 +26,8 @@ export function createApp(): Express {
       credentials: true,
     }),
   );
-  app.use(express.json({ limit: '1mb' }));
+  // Las imágenes de proyectos/instituciones llegan como data URL base64 en el JSON.
+  app.use(express.json({ limit: env.JSON_BODY_LIMIT }));
   app.use(requestLogger);
 
   app.use(env.API_PREFIX, apiRouter);

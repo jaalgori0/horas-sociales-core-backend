@@ -19,6 +19,11 @@ const envSchema = z.object({
     .default('/api/v1'),
   CORS_ORIGINS: z.string().default('*'),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  // Tamaño máximo del cuerpo JSON (las imágenes llegan como data URL base64).
+  JSON_BODY_LIMIT: z
+    .string()
+    .regex(/^\d+(kb|mb)$/i, 'JSON_BODY_LIMIT debe ser como "8mb" o "500kb"')
+    .default('8mb'),
 
   DB_HOST: z.string().min(1),
   DB_PORT: z.coerce.number().int().min(1).max(65535).default(5432),
@@ -29,6 +34,12 @@ const envSchema = z.object({
   DB_LOGGING: booleanFromString,
   DB_SSL: booleanFromString,
   DB_SSL_REJECT_UNAUTHORIZED: booleanFromString.default('true'),
+
+  // Autenticación de usuarios administrativos (tabla users).
+  // AUTH_ALLOW_REGISTER=false cierra POST /auth/register (recomendado en producción).
+  AUTH_ALLOW_REGISTER: booleanFromString.default('true'),
+  // Rol que recibe una cuenta creada por autoregistro. Nunca ADMIN por defecto.
+  AUTH_REGISTER_ROLE: z.enum(['ADMIN', 'COORDINADOR', 'CONSULTA']).default('CONSULTA'),
 
   // Opcionales a nivel de esquema para que `pnpm db:migrate` no las exija;
   // el servidor HTTP las valida al arrancar (ver core/security/crypto.ts).

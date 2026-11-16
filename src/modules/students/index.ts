@@ -6,3 +6,10 @@ export { studentsRouter } from './routes/students.routes.js';
 export { studentsService } from './services/students.service.js';
 export type { StudentDTO, StudentHoursDTO } from './services/students.service.js';
 export { Student, GENEROS, type Genero } from './models/student.model.js';
+export {
+  studentNameSql,
+  studentDisplayName,
+  generoToUI,
+  generoFromUI,
+  type GeneroUI,
+} from './student-display.js';

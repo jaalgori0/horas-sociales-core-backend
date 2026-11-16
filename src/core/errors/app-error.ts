@@ -19,6 +19,18 @@ export class AppError extends Error {
     return new AppError(400, 'BAD_REQUEST', message, details);
   }
 
+  static unauthorized(message = 'No autenticado'): AppError {
+    return new AppError(401, 'UNAUTHORIZED', message);
+  }
+
+  static forbidden(message = 'Operación no permitida'): AppError {
+    return new AppError(403, 'FORBIDDEN', message);
+  }
+
+  static tooManyRequests(message: string, details?: unknown): AppError {
+    return new AppError(429, 'TOO_MANY_REQUESTS', message, details);
+  }
+
   static notFound(message = 'Recurso no encontrado'): AppError {
     return new AppError(404, 'NOT_FOUND', message);
   }

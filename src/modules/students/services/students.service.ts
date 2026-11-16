@@ -2,17 +2,21 @@
  * Lógica de negocio de estudiantes. No conoce Express (ni req ni res):
  * recibe datos ya validados y devuelve DTOs o lanza AppError.
  */
-import { ForeignKeyConstraintError, Op, QueryTypes, type WhereOptions } from 'sequelize';
+import { ForeignKeyConstraintError, Op, QueryTypes, type Transaction, type WhereOptions } from 'sequelize';
 import { sequelize } from '../../../core/config/database.js';
 import { AppError } from '../../../core/errors/app-error.js';
+import { withTransaction } from '../../../core/database/sql.js';
 import { encryptDui, hashDui } from '../../../core/security/crypto.js';
 import { Career } from '../../careers/models/career.model.js';
 import { Student, type Genero } from '../models/student.model.js';
+import { studentDisplayName } from '../student-display.js';
 import type { CreateStudentInput, ListStudentsQuery, UpdateStudentInput } from '../schemas/student.schemas.js';
 
 export interface StudentDTO {
   id: string;
   carnet: string;
+  /** Nombre visible: nombres + apellidos, o nombre_completo en históricos. Nunca null. */
+  nombre: string;
   /** null en históricos del CSS hasta que se completen (ver migración 002). */
   nombres: string | null;
   apellidos: string | null;
@@ -48,6 +52,7 @@ function toDTO(student: Student): StudentDTO {
   return {
     id: student.id,
     carnet: student.carnet,
+    nombre: studentDisplayName(student),
     nombres: student.nombres,
     apellidos: student.apellidos,
     nombreCompleto: student.nombreCompleto,
@@ -98,14 +103,14 @@ function protectDui(dui: string | null | undefined): { duiHash?: Buffer | null; 
   return { duiHash: hashDui(dui), duiCifrado: encryptDui(dui) };
 }
 
-async function assertCareerExists(careerId: string): Promise<void> {
-  const career = await Career.findByPk(careerId, { attributes: ['id', 'activo'] });
+async function assertCareerExists(careerId: string, transaction?: Transaction): Promise<void> {
+  const career = await Career.findByPk(careerId, { attributes: ['id', 'activo'], transaction });
   if (!career) throw AppError.unprocessable('La carrera indicada no existe', { field: 'careerId' });
   if (!career.activo) throw AppError.unprocessable('La carrera indicada está inactiva', { field: 'careerId' });
 }
 
-async function findOrFail(id: string): Promise<Student> {
-  const student = await Student.findByPk(id, { include: [CAREER_INCLUDE] });
+async function findOrFail(id: string, transaction?: Transaction): Promise<Student> {
+  const student = await Student.findByPk(id, { include: [CAREER_INCLUDE], transaction });
   if (!student) throw AppError.notFound('Estudiante no encontrado');
   return student;
 }
@@ -180,47 +185,57 @@ export const studentsService = {
     };
   },
 
+  // Las escrituras corren en withTransaction(): fija app.actor = 'api' para el trigger de auditoría.
   async create(input: CreateStudentInput): Promise<StudentDTO> {
-    const { dui, ...data } = input;
-    await assertCareerExists(data.careerId);
+    return withTransaction(async (transaction) => {
+      const { dui, ...data } = input;
+      await assertCareerExists(data.careerId, transaction);
 
-    const created = await Student.create({
-      ...compact(data),
-      carnet: data.carnet,
-      nombres: data.nombres,
-      apellidos: data.apellidos,
-      correoInstitucional: data.correoInstitucional,
-      careerId: data.careerId,
-      ...protectDui(dui),
+      const created = await Student.create(
+        {
+          ...compact(data),
+          carnet: data.carnet,
+          nombres: data.nombres,
+          apellidos: data.apellidos,
+          correoInstitucional: data.correoInstitucional,
+          careerId: data.careerId,
+          ...protectDui(dui),
+        },
+        { transaction },
+      );
+
+      return toDTO(await findOrFail(created.id, transaction));
     });
-
-    return toDTO(await findOrFail(created.id));
   },
 
   async update(id: string, input: UpdateStudentInput): Promise<StudentDTO> {
-    const student = await findOrFail(id);
-    const { dui, ...data } = input;
+    return withTransaction(async (transaction) => {
+      const student = await findOrFail(id, transaction);
+      const { dui, ...data } = input;
 
-    if (data.careerId && data.careerId !== student.careerId) {
-      await assertCareerExists(data.careerId);
-    }
+      if (data.careerId && data.careerId !== student.careerId) {
+        await assertCareerExists(data.careerId, transaction);
+      }
 
-    // Histórico del CSS (sin nombres/apellidos): se completan los dos a la vez o ninguno.
-    if (student.nombres === null && (data.nombres === undefined) !== (data.apellidos === undefined)) {
-      throw AppError.unprocessable(
-        'Este estudiante proviene del histórico y aún no tiene nombres/apellidos separados: envíe ambos campos juntos.',
-        { nombreCompleto: student.nombreCompleto },
-      );
-    }
+      // Histórico del CSS (sin nombres/apellidos): se completan los dos a la vez o ninguno.
+      if (student.nombres === null && (data.nombres === undefined) !== (data.apellidos === undefined)) {
+        throw AppError.unprocessable(
+          'Este estudiante proviene del histórico y aún no tiene nombres/apellidos separados: envíe ambos campos juntos.',
+          { nombreCompleto: student.nombreCompleto },
+        );
+      }
 
-    await student.update({ ...compact(data), ...protectDui(dui) });
-    return toDTO(await findOrFail(id));
+      await student.update({ ...compact(data), ...protectDui(dui) }, { transaction });
+      return toDTO(await findOrFail(id, transaction));
+    });
   },
 
   async remove(id: string): Promise<void> {
-    const student = await findOrFail(id);
     try {
-      await student.destroy();
+      await withTransaction(async (transaction) => {
+        const student = await findOrFail(id, transaction);
+        await student.destroy({ transaction });
+      });
     } catch (error) {
       if (error instanceof ForeignKeyConstraintError) {
         throw AppError.conflict(

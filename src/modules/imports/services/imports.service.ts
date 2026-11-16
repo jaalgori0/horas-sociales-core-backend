@@ -364,7 +364,8 @@ export type BatchDetailDTO = Awaited<ReturnType<typeof getBatch>>;
 // API del servicio
 // -----------------------------------------------------------------------------
 export const importsService = {
-  async createPreview(files: readonly UploadedFile[]): Promise<BatchDetailDTO> {
+  /** `actor`: quién sube (queda en creado_por vía fn_current_actor()). */
+  async createPreview(files: readonly UploadedFile[], actor: string): Promise<BatchDetailDTO> {
     const parsed = await parseUploadedFiles(files);
 
     const batchId = await withTransaction(async (t) => {
@@ -386,7 +387,7 @@ export const importsService = {
         transaction: t,
       });
       return id;
-    });
+    }, actor);
 
     return getBatch(batchId);
   },
@@ -403,7 +404,8 @@ export const importsService = {
     return rows.map((row) => ({ ...batchDTO(row), archivos: Number(row.archivos) }));
   },
 
-  async confirm(id: string): Promise<BatchDetailDTO> {
+  /** `actor`: quién confirma (confirmado_por y auditoría de cada fila escrita). */
+  async confirm(id: string, actor: string): Promise<BatchDetailDTO> {
     const outcome = await withTransaction(async (t) => {
       // Una confirmación a la vez: la siguiente espera y reclasifica con lo ya escrito.
       await sequelize.query('SELECT pg_advisory_xact_lock(:key)', {
@@ -419,6 +421,27 @@ export const importsService = {
       if (batch.estado === 'CONFIRMADO') throw AppError.conflict('El lote ya fue confirmado', { confirmadoEn: batch.confirmado_en });
       if (batch.estado === 'DESCARTADO') throw AppError.conflict('El lote fue descartado; suba los archivos de nuevo');
       if (batch.expirado) throw AppError.conflict('La vista previa expiró; suba los archivos de nuevo', { expiraEn: batch.expira_en });
+
+      // Misma regla que el frontend, aplicada aquí para que no se salte llamando a la API directo:
+      // si lo extraído no cuadra con los totales impresos del reporte, la extracción no es confiable.
+      const descuadres = await selectAll<{ archivo: string; controles: string[] }>(
+        `SELECT f.archivo, array_agg(c ->> 'control' ORDER BY c ->> 'control') AS controles
+         FROM import_files f
+         CROSS JOIN LATERAL jsonb_array_elements(f.conciliacion) c
+         WHERE f.batch_id = :id AND f.estado = 'PROCESADO' AND (c ->> 'ok')::boolean IS FALSE
+         GROUP BY f.archivo
+         ORDER BY f.archivo`,
+        { id },
+        t,
+      );
+      if (descuadres.length > 0) {
+        throw new AppError(
+          400,
+          'DESCUADRE_TOTALES',
+          `No se puede confirmar: ${descuadres.length === 1 ? 'un archivo no cuadra' : `${descuadres.length} archivos no cuadran`} con los totales de su reporte (${descuadres.map((d) => d.archivo).join(', ')}).`,
+          { archivos: descuadres },
+        );
+      }
 
       // El maestro pudo cambiar desde la vista previa (otra importación, edición en la app).
       const { huella, resumen } = await classifyAndSummarize(id, t);
@@ -439,7 +462,7 @@ export const importsService = {
         { replacements: { id, resultado: JSON.stringify(resultado) }, transaction: t },
       );
       return 'confirmado' as const;
-    }, `import:${id}`);
+    }, actor);
 
     const detail = await getBatch(id);
     if (outcome === 'desactualizado') {
@@ -451,7 +474,7 @@ export const importsService = {
     return detail;
   },
 
-  async discard(id: string): Promise<void> {
+  async discard(id: string, actor: string): Promise<void> {
     await withTransaction(async (t) => {
       const batch = await selectOne<{ estado: string }>(
         'SELECT estado FROM import_batches WHERE id = :id FOR UPDATE',
@@ -469,6 +492,6 @@ export const importsService = {
         replacements: { id },
         transaction: t,
       });
-    });
+    }, actor);
   },
 };

@@ -5,11 +5,13 @@
 import { env } from './core/config/env.js';
 import { assertDatabaseConnection, closeDatabase } from './core/config/database.js';
 import { assertSecurityConfig } from './core/security/crypto.js';
+import { assertAuthConfig } from './core/security/token.js';
 import { createApp } from './core/server/app.js';
 import { logger } from './core/logger.js';
 
 async function bootstrap(): Promise<void> {
   assertSecurityConfig();
+  assertAuthConfig();
   await assertDatabaseConnection();
 
   const app = createApp();

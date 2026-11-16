@@ -300,8 +300,11 @@ export async function extractPdfHoursReport(archivo: string, data: Uint8Array): 
       const content = await page.getTextContent();
       const fragments: Fragment[] = [];
       for (const item of content.items) {
-        if (!('str' in item) || item.str.trim() === '') continue;
-        fragments.push({ str: item.str, x: item.transform[4], y: item.transform[5], width: item.width });
+        if (!('str' in item)) continue;
+        // Sin NUL: PostgreSQL no los acepta en `text` y abortarían todo el lote.
+        const str = item.str.replace(/\u0000/g, '');
+        if (str.trim() === '') continue;
+        fragments.push({ str, x: item.transform[4], y: item.transform[5], width: item.width });
       }
 
       const lines = groupIntoLines(fragments);

@@ -2,11 +2,12 @@
  * Registro e inicio de sesión de usuarios administrativos (tabla `users`).
  *
  * Respuesta = AuthUser del frontend ({ id, nombre, apellido, correo }) + rol.
- * Hoy el frontend solo guarda ese objeto en localStorage: este backend todavía
- * NO emite tokens ni protege rutas por rol (pendiente para cuando el frontend
- * envíe credenciales en cada petición).
+ * El login agrega `token` y `expiresAt`: el frontend envía el token en
+ * `Authorization: Bearer <token>` y las rutas protegidas lo validan con
+ * requireAuth (core/server/middlewares/require-auth.ts).
  */
 import { env } from '../../../core/config/env.js';
+import { issueToken } from '../../../core/security/token.js';
 import { AppError } from '../../../core/errors/app-error.js';
 import { execReturning, selectOne, withTransaction } from '../../../core/database/sql.js';
 import type { LoginInput, RegisterInput } from '../schemas/auth.schemas.js';
@@ -19,6 +20,11 @@ export interface AuthUserDTO {
   apellido: string;
   correo: string;
   rol: string;
+}
+
+export interface LoginResultDTO extends AuthUserDTO {
+  token: string;
+  expiresAt: string;
 }
 
 interface UserRow {
@@ -58,7 +64,7 @@ export const authService = {
   },
 
   /** `clientKey` identifica el origen (IP) para limitar intentos fallidos. */
-  async login(input: LoginInput, clientKey: string): Promise<AuthUserDTO> {
+  async login(input: LoginInput, clientKey: string): Promise<LoginResultDTO> {
     const throttleKey = `${clientKey}|${input.correo}`;
     const wait = loginThrottle.retryAfter(throttleKey);
     if (wait > 0) {
@@ -83,6 +89,7 @@ export const authService = {
     await withTransaction((t) =>
       execReturning('UPDATE users SET ultimo_acceso_en = now() WHERE id = :id RETURNING id', { id: user.id }, t),
     );
-    return toDTO(user);
+    const { token, expiresAt } = issueToken(user.id);
+    return { ...toDTO(user), token, expiresAt: expiresAt.toISOString() };
   },
 };

@@ -387,6 +387,10 @@ pnpm docker:reset     # ⚠ borrar los datos y volver a crear el esquema desde 0
 | `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn` o `error` |
 | `IMPORT_MAX_FILE_MB` | no | `15` | Tamaño máximo por archivo en `POST /imports` (en memoria) |
 | `IMPORT_MAX_FILES` | no | `20` | Archivos por lote en `POST /imports` |
+| `IMPORT_MAX_TOTAL_MB` | no | `50` | Suma máxima de todos los archivos de un request en `POST /imports` |
+| `IMPORT_RATE_LIMIT_PER_MIN` | no | `20` | Peticiones por minuto a `/imports` por usuario |
+| `AUTH_SECRET` | **sí (API)** | — | Secreto HMAC de los tokens de sesión, 32 caracteres o más |
+| `AUTH_TOKEN_TTL_HOURS` | no | `8` | Validez del token de sesión, en horas |
 | `DB_HOST` | **sí** | — | Host de PostgreSQL |
 | `DB_PORT` | no | `5432` | Puerto (el `.env.example` usa `5434`) |
 | `DB_NAME` / `DB_USER` / `DB_PASSWORD` | **sí** | — | Credenciales de la BD |
@@ -397,7 +401,7 @@ pnpm docker:reset     # ⚠ borrar los datos y volver a crear el esquema desde 0
 | `DUI_HASH_KEY` | **sí (API)** | — | Clave HMAC de 32 caracteres o más |
 | `DUI_ENCRYPTION_KEY` | **sí (API)** | — | 64 caracteres hexadecimales (32 bytes) para AES-256 |
 
-`env.ts` valida todas las variables al arrancar; si alguna es inválida, el proceso termina con un mensaje claro. Las claves `DUI_*` no son necesarias para `db:migrate`, pero el servidor no arranca sin ellas.
+`env.ts` valida todas las variables al arrancar; si alguna es inválida, el proceso termina con un mensaje claro. Las claves `DUI_*` y `AUTH_SECRET` no son necesarias para `db:migrate`, pero el servidor no arranca sin ellas.
 
 ---
 
@@ -469,18 +473,20 @@ INSERT INTO careers (faculty_id, nombre) SELECT id, 'Ingeniería Informática' F
 
 Base: `http://localhost:3000/api/v1/imports`. Carga los mismos reportes del CSS que el ETL histórico (PDF «Detalle de Horas por Proyecto» y Excel «Memoria de Labores»), pero subidos desde la app y en dos pasos: **vista previa** y **confirmación**. Requiere la migración `004_import_batches.sql`.
 
+**Autenticación.** Todas las rutas exigen `Authorization: Bearer <token>`. El token lo devuelve `POST /auth/login` (campos `token` y `expiresAt`, junto al usuario) y vale `AUTH_TOKEN_TTL_HOURS` horas. Sin token válido, o con la cuenta inactiva, la respuesta es **401**. Cada usuario tiene un cupo de `IMPORT_RATE_LIMIT_PER_MIN` peticiones por minuto (**429** con `Retry-After`). El middleware está en `core/server/middlewares/require-auth.ts` (`requireAuth` y `requireRole(...)`) y sirve para proteger cualquier otro router.
+
 | Método | Ruta | Descripción | Respuestas |
 |---|---|---|---|
-| `POST` | `/` | `multipart/form-data`, campo `files` (PDF/XLS/XLSX). Extrae, clasifica y devuelve la vista previa. **No escribe en el maestro** | 201, 400, 413 |
+| `POST` | `/` | `multipart/form-data`, campo `files` (PDF/XLS/XLSX). Extrae, clasifica y devuelve la vista previa. **No escribe en el maestro** | 201, 400, 411, 413 |
 | `GET` | `/` | Historial de lotes. Query: `limit` (≤ 200) | 200 |
 | `GET` | `/:id` | Lote, archivos, resumen e ítems. Query: `estado`, `entidad` | 200, 404 |
-| `POST` | `/:id/confirm` | Inserción estricta | 200, 404, 409 |
+| `POST` | `/:id/confirm` | Inserción estricta. **400 `DESCUADRE_TOTALES`** si algún archivo no cuadra con los totales de su reporte | 200, 400, 404, 409 |
 | `DELETE` | `/:id` | Descarta una vista previa | 204, 404, 409 |
 
 **Reglas de carga**
 
 1. **Cero sobrescritura:** lo que ya existe se ignora (`ON CONFLICT DO NOTHING`).
-2. **Solo se completan campos `NULL`:** `institutions.codigo_css` (cuando se adopta una institución con el mismo nombre), y en proyectos `correlativo_css`, `fecha_inicio`, `fecha_cierre` y `atributos.area_css`. Las fechas solo se completan con las fechas oficiales del Excel. Cada cambio queda en `auditoria` con el actor `import:<id del lote>`.
+2. **Solo se completan campos `NULL`:** `institutions.codigo_css` (cuando se adopta una institución con el mismo nombre), y en proyectos `correlativo_css`, `fecha_inicio`, `fecha_cierre` y `atributos.area_css`. Las fechas solo se completan con las fechas oficiales del Excel. Cada cambio queda en `auditoria` con el actor `<correo> (<id de usuario>)` de quien confirmó; el mismo valor queda en `creado_por` / `confirmado_por` del lote.
 3. **Sin topes de horas:** una participación nueva entra y suma al historial del estudiante, aunque ya tenga 300 o 600 horas.
 4. **Aislamiento por lote:** las filas van a tablas `import_*` con `batch_id`, y la clasificación usa tablas temporales de la conexión. Las confirmaciones se serializan con `pg_advisory_xact_lock`, y cada una vuelve a clasificar contra el maestro actual. Si el resultado difiere de la vista previa, responde **409 `PREVIEW_DESACTUALIZADA`** con la clasificación nueva (que queda guardada) y no escribe nada.
 
@@ -495,9 +501,17 @@ Base: `http://localhost:3000/api/v1/imports`. Carga los mismos reportes del CSS 
 
 El motivo de cada estado está en `motivos` (por ejemplo `horas_difieren` o `completa_codigo_css`). El ítem muestra `datos` (lo que trae el archivo), `existente` (lo que hay en la BD) y `completar` (campo → valor que se llenará).
 
+**Límites de memoria.** Cada archivo pesa como máximo `IMPORT_MAX_FILE_MB`, y la suma del request `IMPORT_MAX_TOTAL_MB`: se exige `Content-Length` y el exceso se rechaza con 413 antes de leer el cuerpo. Del Excel se leen como máximo 10 000 filas y 50 columnas por hoja. Si la hoja declara un rango mayor, la vista previa lo muestra como línea no reconocida `hoja_truncada`.
+
 ```bash
+# 0. Sesión
+TOKEN=$(curl -s -H 'Content-Type: application/json' \
+  -d '{"correo":"admin@uca.edu.sv","password":"…"}' \
+  http://localhost:3000/api/v1/auth/login | jq -r .token)
+
 # 1. Vista previa
-curl -F "files=@data/Civil.pdf" -F "files=@data/ReporteEstadisticoCSS(11).xls" \
+curl -H "Authorization: Bearer $TOKEN" \
+     -F "files=@data/Civil.pdf" -F "files=@data/ReporteEstadisticoCSS(11).xls" \
      http://localhost:3000/api/v1/imports
 # { "id": "…", "estado": "PREVISUALIZADO", "expiraEn": "…",
 #   "resumen": { "total": { "NUEVO": 3, "IGNORADO": 250, "ADVERTENCIA": 1, "CONFLICTO": 1 }, "porEntidad": {…}, "horasNuevas": 600 },
@@ -505,16 +519,16 @@ curl -F "files=@data/Civil.pdf" -F "files=@data/ReporteEstadisticoCSS(11).xls" \
 #   "items": [ { "entidad": "PARTICIPACION", "estado": "CONFLICTO", "motivos": ["horas_difieren"], … } ] }
 
 # 2. Revisar solo los conflictos
-curl 'http://localhost:3000/api/v1/imports/<id>?estado=CONFLICTO'
+curl -H "Authorization: Bearer $TOKEN" 'http://localhost:3000/api/v1/imports/<id>?estado=CONFLICTO'
 
 # 3. Confirmar
-curl -X POST http://localhost:3000/api/v1/imports/<id>/confirm
+curl -H "Authorization: Bearer $TOKEN" -X POST http://localhost:3000/api/v1/imports/<id>/confirm
 # { "estado": "CONFIRMADO", "resultado": { "estudiantes_insertados": { "n": 1 }, "movimientos_de_horas": { "n": 1, "horas": 600 }, … } }
 ```
 
 Una vista previa expira a las 24 horas y sus filas se borran al crear el siguiente lote. Un lote confirmado se conserva como historial. El SQL está en `src/modules/imports/sql/` (`classify.sql` valida y clasifica; `apply.sql` escribe), y sus reglas de limpieza son las mismas del ETL (`src/etl/sql/transform_load.sql`).
 
-> Las rutas aún no exigen rol. Antes de producción deben limitarse a `ADMIN`/`COORDINADOR`.
+> Las rutas exigen sesión pero todavía no un rol: cualquier usuario activo puede importar. Para limitarlas a `ADMIN`/`COORDINADOR`, agregue `requireRole('ADMIN', 'COORDINADOR')` en `imports.routes.ts`. Con `AUTH_ALLOW_REGISTER=true`, cualquiera puede crearse una cuenta: ciérrelo en producción.
 
 ---
 
@@ -537,6 +551,8 @@ Una vista previa expira a las 24 horas y sus filas se borran al crear el siguien
 | `Bind for 0.0.0.0:5434 failed: port is already allocated` | Otro proceso usa el puerto. Cambie `DB_PORT` en `.env` y ejecute `pnpm docker:up` |
 | `❌ Variables de entorno inválidas` | Falta `.env` o un valor tiene un formato incorrecto. Compárelo con `.env.example` |
 | `Faltan DUI_HASH_KEY y/o DUI_ENCRYPTION_KEY` | Genere las claves con los comandos indicados en `.env.example` |
+| `Falta AUTH_SECRET en el entorno` | Genere el secreto con el comando indicado en `.env.example` |
+| `401 Sesión no válida o vencida` en `/imports` | Falta `Authorization: Bearer <token>`, el token venció (`AUTH_TOKEN_TTL_HOURS`) o cambió `AUTH_SECRET`. Inicie sesión de nuevo |
 | `Integridad de migraciones comprometida … MODIFICADA` | Se editó un `.sql` aplicado. Restáurelo (`git checkout`) y cree una migración nueva |
 | `relation "students" does not exist` | No se aplicó el esquema. Ejecute `pnpm db:migrate`, o `pnpm docker:reset` si es local |
 | Se cambió `001` pero Docker no lo vuelve a ejecutar | Docker init solo corre con el volumen vacío. Use `pnpm docker:reset` (solo en local) |

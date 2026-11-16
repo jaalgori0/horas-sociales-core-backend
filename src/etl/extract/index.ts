@@ -67,11 +67,12 @@ export async function extractFile(nombre: string, data: Uint8Array): Promise<Fil
 
   // El hash se calcula ANTES de parsear: pdf.js puede transferir (y vaciar) el buffer.
   const sha256 = sha256Hex(data);
-  // Copia propia: el llamador conserva su buffer intacto.
-  const bytes = new Uint8Array(data);
 
   if (kind === 'PDF') {
-    const extraction = await extractPdfHoursReport(archivo, bytes);
+    // Copia SOLO para pdf.js: puede transferir (desligar) el ArrayBuffer que recibe, y un
+    // Buffer pequeño de Node comparte su ArrayBuffer con el pool interno. SheetJS solo lee,
+    // así que el Excel se pasa sin copiar (un archivo de 15 MB ya no ocupa el doble).
+    const extraction = await extractPdfHoursReport(archivo, new Uint8Array(data));
     if (extraction.file.titulo === null) {
       throw new LayoutError(`${archivo}: no parece un reporte "Detalle de Horas por Proyecto" (sin título).`);
     }
@@ -84,7 +85,7 @@ export async function extractFile(nombre: string, data: Uint8Array): Promise<Fil
     };
   }
 
-  const extraction = extractXlsMemoriaLabores(archivo, bytes);
+  const extraction = extractXlsMemoriaLabores(archivo, data);
   if (extraction.file.titulo === null) {
     throw new LayoutError(`${archivo}: no parece un reporte "Memoria de Labores del CSS" (sin título).`);
   }

@@ -28,6 +28,10 @@ const envSchema = z.object({
   // Importación masiva (POST /imports): archivos PDF/XLS en memoria, nunca en disco.
   IMPORT_MAX_FILE_MB: z.coerce.number().int().min(1).max(100).default(15),
   IMPORT_MAX_FILES: z.coerce.number().int().min(1).max(50).default(20),
+  // Tope de bytes de TODO el request (suma de archivos), además del límite por archivo.
+  IMPORT_MAX_TOTAL_MB: z.coerce.number().int().min(1).max(500).default(50),
+  // Peticiones por minuto a /imports por usuario autenticado.
+  IMPORT_RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).max(1000).default(20),
 
   DB_HOST: z.string().min(1),
   DB_PORT: z.coerce.number().int().min(1).max(65535).default(5432),
@@ -44,6 +48,10 @@ const envSchema = z.object({
   AUTH_ALLOW_REGISTER: booleanFromString.default('true'),
   // Rol que recibe una cuenta creada por autoregistro. Nunca ADMIN por defecto.
   AUTH_REGISTER_ROLE: z.enum(['ADMIN', 'COORDINADOR', 'CONSULTA']).default('CONSULTA'),
+  // Secreto HMAC de los tokens de sesión (POST /auth/login → Authorization: Bearer).
+  // Opcional a nivel de esquema (db:migrate no lo necesita); el servidor HTTP lo exige.
+  AUTH_SECRET: z.string().min(32, 'AUTH_SECRET debe tener al menos 32 caracteres').optional(),
+  AUTH_TOKEN_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(8),
 
   // Opcionales a nivel de esquema para que `pnpm db:migrate` no las exija;
   // el servidor HTTP las valida al arrancar (ver core/security/crypto.ts).

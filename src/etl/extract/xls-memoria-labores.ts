@@ -17,6 +17,12 @@
  * El texto trae mojibake irrecuperable ("ESPAÃ?A": el segundo byte UTF-8 ya es un '?'
  * literal). Se conserva tal cual y se marca con la advertencia `texto_con_mojibake`;
  * la reparación se hace en SQL cruzando contra los nombres limpios de los PDFs.
+ *
+ * Límites de lectura (protección del event loop): el rango `!ref` lo declara el propio
+ * archivo y puede ser enorme (A1:XFD1048576 = 17 mil millones de celdas) aunque casi
+ * todo esté vacío. Se leen como máximo MAX_ROWS filas (opción `sheetRows` de SheetJS,
+ * que además evita materializar las celdas sobrantes) y MAX_COLS columnas. Si la hoja
+ * declaraba más, queda una línea no reconocida `hoja_truncada` visible en la vista previa.
  */
 import * as XLSX from 'xlsx';
 import {
@@ -53,6 +59,10 @@ const RE = {
   mojibake: /Ã.|Â|�/,
 } as const;
 
+/** El reporte real tiene unas pocas centenas de filas y usa hasta la columna AH (34). */
+export const MAX_ROWS = 10_000;
+export const MAX_COLS = 50;
+
 export interface XlsExtraction {
   file: Omit<SourceFileRecord, 'sha256'>;
   rows: XlsProjectRow[];
@@ -63,7 +73,8 @@ export interface XlsExtraction {
 /** Texto visible de la celda (respeta ceros a la izquierda si la celda tuviera formato). */
 function cellText(cell: XLSX.CellObject | undefined): string {
   if (!cell || cell.v === undefined || cell.v === null) return '';
-  return (cell.w ?? String(cell.v)).trim();
+  // Sin NUL: PostgreSQL no los acepta en `text` y abortarían todo el lote.
+  return (cell.w ?? String(cell.v)).replace(/\u0000/g, '').trim();
 }
 
 function sameKeys(cells: Map<string, string>, keys: string[]): boolean {
@@ -71,7 +82,7 @@ function sameKeys(cells: Map<string, string>, keys: string[]): boolean {
 }
 
 export function extractXlsMemoriaLabores(archivo: string, data: Uint8Array): XlsExtraction {
-  const workbook = XLSX.read(data, { type: 'array', cellDates: false, cellText: true });
+  const workbook = XLSX.read(data, { type: 'array', cellDates: false, cellText: true, sheetRows: MAX_ROWS });
 
   const file: XlsExtraction['file'] = {
     archivo,
@@ -86,19 +97,34 @@ export function extractXlsMemoriaLabores(archivo: string, data: Uint8Array): Xls
   const controlTotals: ControlTotal[] = [];
   const unparsed: UnparsedLine[] = [];
 
-  for (const hoja of workbook.SheetNames) {
-    const sheet = workbook.Sheets[hoja]!;
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName]!;
+    const hoja = sheetName.replace(/\u0000/g, '');
     if (!sheet['!ref']) continue;
     const range = XLSX.utils.decode_range(sheet['!ref']);
+    // `!fullref` solo existe si sheetRows recortó la hoja: es el rango que declaraba el archivo.
+    const declared = XLSX.utils.decode_range(sheet['!fullref'] ?? sheet['!ref']);
+    const lastRow = Math.min(range.e.r, range.s.r + MAX_ROWS - 1);
+    const lastCol = Math.min(range.e.c, range.s.c + MAX_COLS - 1);
+    if (declared.e.r > lastRow || declared.e.c > lastCol) {
+      unparsed.push({
+        archivo,
+        ubicacion: `${hoja}!${XLSX.utils.encode_range({ s: range.s, e: { r: lastRow, c: lastCol } })}`,
+        texto:
+          `La hoja declara el rango ${XLSX.utils.encode_range(declared)}; solo se leyeron las primeras ` +
+          `${MAX_ROWS} filas y ${MAX_COLS} columnas.`,
+        motivo: 'hoja_truncada',
+      });
+    }
     let area: string | null = null;
     let headerSeen = false;
 
-    for (let r = range.s.r; r <= range.e.r; r++) {
+    for (let r = range.s.r; r <= lastRow; r++) {
       const filaExcel = r + 1;
       const ubicacion = `${hoja}!f${filaExcel}`;
 
       const cells = new Map<string, string>();
-      for (let c = range.s.c; c <= range.e.c; c++) {
+      for (let c = range.s.c; c <= lastCol; c++) {
         const text = cellText(sheet[XLSX.utils.encode_cell({ r, c })]);
         if (text !== '') cells.set(XLSX.utils.encode_col(c), text);
       }

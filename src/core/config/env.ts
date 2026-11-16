@@ -25,6 +25,10 @@ const envSchema = z.object({
     .regex(/^\d+(kb|mb)$/i, 'JSON_BODY_LIMIT debe ser como "8mb" o "500kb"')
     .default('8mb'),
 
+  // Importación masiva (POST /imports): archivos PDF/XLS en memoria, nunca en disco.
+  IMPORT_MAX_FILE_MB: z.coerce.number().int().min(1).max(100).default(15),
+  IMPORT_MAX_FILES: z.coerce.number().int().min(1).max(50).default(20),
+
   DB_HOST: z.string().min(1),
   DB_PORT: z.coerce.number().int().min(1).max(65535).default(5432),
   DB_NAME: z.string().min(1),

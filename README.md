@@ -23,9 +23,10 @@ Backend central de **Horas Sociales UCA**. Reúne en **una sola base de datos Po
 7. [Docker](#7-docker)
 8. [Variables de entorno](#8-variables-de-entorno)
 9. [API: módulo `students`](#9-api-módulo-students)
-10. [Convenciones de código](#10-convenciones-de-código)
-11. [Solución de problemas](#11-solución-de-problemas)
-12. [Próximos pasos](#12-próximos-pasos)
+10. [API: importación masiva (`imports`)](#10-api-importación-masiva-imports)
+11. [Convenciones de código](#11-convenciones-de-código)
+12. [Solución de problemas](#12-solución-de-problemas)
+13. [Próximos pasos](#13-próximos-pasos)
 
 ---
 
@@ -384,6 +385,8 @@ pnpm docker:reset     # ⚠ borrar los datos y volver a crear el esquema desde 0
 | `API_PREFIX` | no | `/api/v1` | Prefijo de todas las rutas |
 | `CORS_ORIGINS` | no | `*` | Orígenes permitidos, separados por coma |
 | `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn` o `error` |
+| `IMPORT_MAX_FILE_MB` | no | `15` | Tamaño máximo por archivo en `POST /imports` (en memoria) |
+| `IMPORT_MAX_FILES` | no | `20` | Archivos por lote en `POST /imports` |
 | `DB_HOST` | **sí** | — | Host de PostgreSQL |
 | `DB_PORT` | no | `5432` | Puerto (el `.env.example` usa `5434`) |
 | `DB_NAME` / `DB_USER` / `DB_PASSWORD` | **sí** | — | Credenciales de la BD |
@@ -462,7 +465,60 @@ INSERT INTO careers (faculty_id, nombre) SELECT id, 'Ingeniería Informática' F
 
 ---
 
-## 10. Convenciones de código
+## 10. API: importación masiva (`imports`)
+
+Base: `http://localhost:3000/api/v1/imports`. Carga los mismos reportes del CSS que el ETL histórico (PDF «Detalle de Horas por Proyecto» y Excel «Memoria de Labores»), pero subidos desde la app y en dos pasos: **vista previa** y **confirmación**. Requiere la migración `004_import_batches.sql`.
+
+| Método | Ruta | Descripción | Respuestas |
+|---|---|---|---|
+| `POST` | `/` | `multipart/form-data`, campo `files` (PDF/XLS/XLSX). Extrae, clasifica y devuelve la vista previa. **No escribe en el maestro** | 201, 400, 413 |
+| `GET` | `/` | Historial de lotes. Query: `limit` (≤ 200) | 200 |
+| `GET` | `/:id` | Lote, archivos, resumen e ítems. Query: `estado`, `entidad` | 200, 404 |
+| `POST` | `/:id/confirm` | Inserción estricta | 200, 404, 409 |
+| `DELETE` | `/:id` | Descarta una vista previa | 204, 404, 409 |
+
+**Reglas de carga**
+
+1. **Cero sobrescritura:** lo que ya existe se ignora (`ON CONFLICT DO NOTHING`).
+2. **Solo se completan campos `NULL`:** `institutions.codigo_css` (cuando se adopta una institución con el mismo nombre), y en proyectos `correlativo_css`, `fecha_inicio`, `fecha_cierre` y `atributos.area_css`. Las fechas solo se completan con las fechas oficiales del Excel. Cada cambio queda en `auditoria` con el actor `import:<id del lote>`.
+3. **Sin topes de horas:** una participación nueva entra y suma al historial del estudiante, aunque ya tenga 300 o 600 horas.
+4. **Aislamiento por lote:** las filas van a tablas `import_*` con `batch_id`, y la clasificación usa tablas temporales de la conexión. Las confirmaciones se serializan con `pg_advisory_xact_lock`, y cada una vuelve a clasificar contra el maestro actual. Si el resultado difiere de la vista previa, responde **409 `PREVIEW_DESACTUALIZADA`** con la clasificación nueva (que queda guardada) y no escribe nada.
+
+**Estados de cada ítem** (`entidad`: `INSTITUCION`, `PROYECTO`, `ESTUDIANTE`, `PARTICIPACION`, o `FILA_PDF`/`FILA_XLS` para una fila inválida)
+
+| Estado | Significado | `accion` |
+|---|---|---|
+| `NUEVO` | No existe; se insertará | `INSERTAR` |
+| `IGNORADO` | Ya existe y coincide; no se toca | `NINGUNA` |
+| `ADVERTENCIA` | Se procesa con observaciones: completa campos `NULL`, el archivo difiere de lo existente (se conserva lo existente) o una celda se cortó por posición | cualquiera |
+| `CONFLICTO` | **No se carga.** Fila inválida, choque de llaves, depende de otra entidad en conflicto o participación existente con horas, estado o fechas distintos | `NINGUNA` |
+
+El motivo de cada estado está en `motivos` (por ejemplo `horas_difieren` o `completa_codigo_css`). El ítem muestra `datos` (lo que trae el archivo), `existente` (lo que hay en la BD) y `completar` (campo → valor que se llenará).
+
+```bash
+# 1. Vista previa
+curl -F "files=@data/Civil.pdf" -F "files=@data/ReporteEstadisticoCSS(11).xls" \
+     http://localhost:3000/api/v1/imports
+# { "id": "…", "estado": "PREVISUALIZADO", "expiraEn": "…",
+#   "resumen": { "total": { "NUEVO": 3, "IGNORADO": 250, "ADVERTENCIA": 1, "CONFLICTO": 1 }, "porEntidad": {…}, "horasNuevas": 600 },
+#   "archivos": [ { "archivo": "Civil.pdf", "estado": "PROCESADO", "filas": 30, "conciliacion": […], … } ],
+#   "items": [ { "entidad": "PARTICIPACION", "estado": "CONFLICTO", "motivos": ["horas_difieren"], … } ] }
+
+# 2. Revisar solo los conflictos
+curl 'http://localhost:3000/api/v1/imports/<id>?estado=CONFLICTO'
+
+# 3. Confirmar
+curl -X POST http://localhost:3000/api/v1/imports/<id>/confirm
+# { "estado": "CONFIRMADO", "resultado": { "estudiantes_insertados": { "n": 1 }, "movimientos_de_horas": { "n": 1, "horas": 600 }, … } }
+```
+
+Una vista previa expira a las 24 horas y sus filas se borran al crear el siguiente lote. Un lote confirmado se conserva como historial. El SQL está en `src/modules/imports/sql/` (`classify.sql` valida y clasifica; `apply.sql` escribe), y sus reglas de limpieza son las mismas del ETL (`src/etl/sql/transform_load.sql`).
+
+> Las rutas aún no exigen rol. Antes de producción deben limitarse a `ADMIN`/`COORDINADOR`.
+
+---
+
+## 11. Convenciones de código
 
 - **Nombres:** las columnas usan `snake_case` y las propiedades TypeScript y JSON usan `camelCase`. Sequelize traduce entre ambos (`underscored: true`).
 - **Idioma:** los nombres de dominio siguen el vocabulario de la UCA (`carnet`, `citas`, `horas`). Las tablas núcleo heredadas del portal se mantienen en inglés (`students`, `projects`).
@@ -474,7 +530,7 @@ INSERT INTO careers (faculty_id, nombre) SELECT id, 'Ingeniería Informática' F
 
 ---
 
-## 11. Solución de problemas
+## 12. Solución de problemas
 
 | Síntoma | Causa probable y solución |
 |---|---|
@@ -490,7 +546,7 @@ INSERT INTO careers (faculty_id, nombre) SELECT id, 'Ingeniería Informática' F
 
 ---
 
-## 12. Próximos pasos
+## 13. Próximos pasos
 
 - [ ] Módulo `auth` (login de `users`, JWT, middleware de roles y fijar `app.actor` por petición).
 - [ ] Módulo `catalogs`: CRUD de `faculties`, `careers` y la geografía, más un *seed* de departamentos, municipios y distritos de El Salvador.

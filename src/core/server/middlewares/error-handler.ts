@@ -9,6 +9,7 @@
 import type { ErrorRequestHandler } from 'express';
 import { DatabaseError, ForeignKeyConstraintError, UniqueConstraintError, ValidationError } from 'sequelize';
 import { ZodError } from 'zod';
+import { MulterError } from 'multer';
 import { AppError } from '../../errors/app-error.js';
 import { logger } from '../../logger.js';
 import { env } from '../../config/env.js';
@@ -18,6 +19,14 @@ interface ErrorBody {
   message: string;
   details?: unknown;
 }
+
+const MULTER_MESSAGES: Partial<Record<MulterError['code'], string>> = {
+  LIMIT_FILE_SIZE: `Un archivo supera el tamaño máximo permitido (${env.IMPORT_MAX_FILE_MB} MB)`,
+  LIMIT_FILE_COUNT: `Se enviaron demasiados archivos (máximo ${env.IMPORT_MAX_FILES})`,
+  LIMIT_UNEXPECTED_FILE: 'Campo de archivo inesperado: envíe los archivos en el campo "files"',
+  LIMIT_PART_COUNT: 'El formulario tiene demasiadas partes',
+  LIMIT_FIELD_COUNT: 'El formulario tiene demasiados campos',
+};
 
 function pgCode(error: { parent?: unknown }): string | undefined {
   return (error.parent as { code?: string } | undefined)?.code;
@@ -71,6 +80,13 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
       code: 'MODEL_VALIDATION_ERROR',
       message: 'Los datos no cumplen las reglas del modelo',
       details: err.errors.map((e) => ({ path: e.path, message: e.message })),
+    };
+  } else if (err instanceof MulterError) {
+    status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+    body = {
+      code: err.code === 'LIMIT_FILE_SIZE' ? 'FILE_TOO_LARGE' : 'INVALID_UPLOAD',
+      message: MULTER_MESSAGES[err.code] ?? 'La carga de archivos no es válida',
+      details: err.field ? { field: err.field } : undefined,
     };
   } else if ((err as { type?: string })?.type === 'entity.parse.failed') {
     status = 400;

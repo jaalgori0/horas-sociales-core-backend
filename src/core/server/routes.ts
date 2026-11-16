@@ -10,6 +10,7 @@ import { institutionsRouter } from '../../modules/institutions/index.js';
 import { projectsRouter } from '../../modules/projects/index.js';
 import { dashboardController, dashboardRouter } from '../../modules/dashboard/index.js';
 import { authRouter } from '../../modules/auth/index.js';
+import { importsRouter } from '../../modules/imports/index.js';
 
 export const apiRouter = express.Router();
 
@@ -31,4 +32,5 @@ apiRouter.use('/institutions', institutionsRouter);
 apiRouter.use('/projects', projectsRouter);
 apiRouter.use('/dashboard', dashboardRouter);
 apiRouter.use('/auth', authRouter);
+apiRouter.use('/imports', importsRouter);
 // apiRouter.use('/citas', citasRouter);

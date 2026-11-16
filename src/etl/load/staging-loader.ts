@@ -16,9 +16,10 @@ import { EtlError, type ExtractionResult } from '../types.js';
 
 const SCHEMA_FILE = path.resolve(process.cwd(), 'src/etl/sql/staging_schema.sql');
 
-type PgType = 'text' | 'integer' | 'text[]';
+/** `jsonb`: el valor es un string JSON ya serializado. */
+export type PgType = 'text' | 'integer' | 'uuid' | 'jsonb' | 'text[]';
 
-interface ColumnDef<T> {
+export interface ColumnDef<T> {
   name: string;
   type: PgType;
   value: (row: T) => string | number | string[] | null;
@@ -45,7 +46,8 @@ async function assertSchemaExists(transaction: Transaction): Promise<void> {
   }
 }
 
-async function bulkInsert<T>(
+/** También lo usa el módulo de importación (tablas import_*_rows con batch_id). */
+export async function bulkInsert<T>(
   table: string,
   columns: ReadonlyArray<ColumnDef<T>>,
   rows: readonly T[],

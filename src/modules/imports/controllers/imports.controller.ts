@@ -12,6 +12,23 @@ export const importsController = {
     res.status(201).location(`${req.baseUrl}/${batch.id}`).json(batch);
   },
 
+  /** POST /review-template — PDF → plantilla .xlsx para revisar antes de importar (no escribe nada). */
+  async reviewTemplate(req: Request, res: Response): Promise<void> {
+    const uploads = Array.isArray(req.files) ? req.files : [];
+    const result = await importsService.buildReviewTemplate(uploads);
+    res
+      .status(200)
+      .type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      .attachment(result.filename)
+      .set({
+        'Cache-Control': 'no-store',
+        'X-Plantilla-Filas': String(result.filas),
+        'X-Plantilla-Filas-Con-Advertencias': String(result.filasConAdvertencias),
+        'X-Plantilla-Lineas-No-Reconocidas': String(result.lineasNoReconocidas),
+      })
+      .send(result.buffer);
+  },
+
   async list(req: Request, res: Response): Promise<void> {
     const { limit } = listImportsQuerySchema.parse(req.query);
     res.json(await importsService.list(limit));

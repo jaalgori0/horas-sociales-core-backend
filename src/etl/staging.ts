@@ -13,7 +13,7 @@ import path from 'node:path';
 import { sequelize } from '../core/config/database.js';
 import { extractAll } from './extract/index.js';
 import { dropStagingSchema, initStagingSchema, loadStaging } from './load/staging-loader.js';
-import { EtlError, LayoutError, type ExtractionResult } from './types.js';
+import { EtlError, LayoutError, isHourDetailSource, type ExtractionResult } from './types.js';
 
 function toInt(value: string | null | undefined): number | null {
   return value != null && /^\d+$/.test(value) ? Number(value) : null;
@@ -31,7 +31,7 @@ function printSummary(result: ExtractionResult): number {
     toInt(result.controlTotals.find((t) => t.archivo === archivo && t.alcance === alcance && t.metrica === metrica)?.valor);
 
   const summary = result.files.map((file) => {
-    if (file.tipo === 'PDF_DETALLE_HORAS') {
+    if (isHourDetailSource(file.tipo)) {
       const rows = result.pdfRows.filter((r) => r.archivo === file.archivo);
       const horas = rows.reduce((sum, r) => sum + (toInt(r.horasAsignadas) ?? 0), 0);
       const expectedRows = total(file.archivo, 'ARCHIVO', 'ALUMNOS');

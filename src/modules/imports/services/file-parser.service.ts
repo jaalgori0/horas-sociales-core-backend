@@ -57,5 +57,44 @@ export async function parseUploadedFiles(files: readonly UploadedFile[]): Promis
     }
   }
 
+  assertTemplatesWithoutTheirPdfs(parsed);
   return parsed;
+}
+
+/**
+ * Una plantilla de revisión trae las mismas filas que los PDF de los que salió: subir ambos
+ * en el mismo lote duplicaría cada participación. Se rechaza el lote completo (400) si un PDF
+ * subido es uno de los de origen de una plantilla, por contenido (SHA-256, aunque se haya
+ * renombrado) o por nombre (aunque se haya vuelto a exportar).
+ */
+function assertTemplatesWithoutTheirPdfs(parsed: readonly ParsedFile[]): void {
+  const sameName = (a: string, b: string) => a.normalize('NFC').toLowerCase() === b.normalize('NFC').toLowerCase();
+  const conflictos: Array<{ plantilla: string; pdfs: string[] }> = [];
+
+  for (const file of parsed) {
+    if (file.estado !== 'procesado' || !file.extraction.origenes?.length) continue;
+    const origenes = file.extraction.origenes;
+    const pdfs = parsed
+      .filter((other) => other !== file)
+      .filter((other) =>
+        origenes.some(
+          (o) =>
+            (o.sha256 !== null && o.sha256 === other.sha256) ||
+            (other.archivo.toLowerCase().endsWith('.pdf') && sameName(o.archivo, other.archivo)),
+        ),
+      )
+      .map((other) => other.archivo);
+    if (pdfs.length > 0) conflictos.push({ plantilla: file.archivo, pdfs });
+  }
+
+  if (conflictos.length > 0) {
+    const detalle = conflictos.map((c) => `«${c.plantilla}» salió de ${c.pdfs.map((p) => `«${p}»`).join(', ')}`).join('; ');
+    throw new AppError(
+      400,
+      'PLANTILLA_CON_SU_PDF',
+      `No suba la plantilla de revisión junto con los PDF de los que salió: las filas se duplicarían (${detalle}). ` +
+        'Quite esos PDF del lote y vuelva a analizar.',
+      { conflictos },
+    );
+  }
 }

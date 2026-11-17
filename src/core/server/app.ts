@@ -24,6 +24,8 @@ export function createApp(): Express {
     cors({
       origin: env.corsOrigins.includes('*') ? true : env.corsOrigins,
       credentials: true,
+      // Descargas (plantilla de revisión): el frontend lee el nombre del archivo y el resumen.
+      exposedHeaders: ['Content-Disposition', 'X-Plantilla-Filas', 'X-Plantilla-Filas-Con-Advertencias', 'X-Plantilla-Lineas-No-Reconocidas'],
     }),
   );
   // Las imágenes de proyectos/instituciones llegan como data URL base64 en el JSON.

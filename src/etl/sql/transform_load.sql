@@ -505,3 +505,8 @@ ON CONFLICT (solicitud_id) DO UPDATE
           IS DISTINCT FROM
           (EXCLUDED.enrollment_id, EXCLUDED.horas, EXCLUDED.naturaleza,
            EXCLUDED.fecha_horas, EXCLUDED.descripcion);
+
+-- 5.9 Estados de proyecto: completa el cierre de los proyectos sin estudiantes activos
+-- (el Excel usa 01/01/1900 = "sin fecha fin" y tapaba el cierre derivado) y finaliza los
+-- vencidos. Misma regla que la confirmación de importaciones; ver migración 007.
+SELECT * FROM fn_sincronizar_estado_proyectos(NULL, true);

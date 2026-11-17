@@ -9,6 +9,7 @@ import { assertAuthConfig } from './core/security/token.js';
 import { createApp } from './core/server/app.js';
 import { logger } from './core/logger.js';
 import { ensureDefaultAdmin } from './modules/auth/index.js';
+import { startProjectStatusSync } from './modules/projects/index.js';
 
 async function bootstrap(): Promise<void> {
   assertSecurityConfig();
@@ -16,6 +17,8 @@ async function bootstrap(): Promise<void> {
   await assertDatabaseConnection();
   // Idempotente: crea el ADMIN por defecto solo si su correo no existe (ver default-admin.ts).
   await ensureDefaultAdmin();
+  // Proyectos ACTIVO cuyo cierre ya venció → FINALIZADO (al arrancar y cada hora).
+  const stopProjectStatusSync = startProjectStatusSync();
 
   const app = createApp();
   const server = app.listen(env.PORT, () => {
@@ -26,6 +29,7 @@ async function bootstrap(): Promise<void> {
   const shutdown = (signal: NodeJS.Signals): void => {
     if (shuttingDown) return;
     shuttingDown = true;
+    stopProjectStatusSync();
     logger.info(`${signal} recibido: cerrando servidor...`);
 
     const forceExit = setTimeout(() => {

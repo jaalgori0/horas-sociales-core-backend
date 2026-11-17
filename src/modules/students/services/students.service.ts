@@ -39,6 +39,7 @@ export interface StudentHoursDTO {
   horasExternas: number;
   horasTotales: number;
   participaciones: number;
+  horasManuales: number;
 }
 
 export interface Paginated<T> {
@@ -168,8 +169,9 @@ export const studentsService = {
       horas_externas: number;
       horas_totales: number;
       participaciones: number;
+      horas_manuales: number;
     }>(
-      `SELECT horas_internas, horas_externas, horas_totales, participaciones
+      `SELECT horas_internas, horas_externas, horas_totales, participaciones, horas_manuales
          FROM v_student_hours
         WHERE student_id = :id`,
       { replacements: { id }, type: QueryTypes.SELECT },
@@ -182,6 +184,7 @@ export const studentsService = {
       horasExternas: row.horas_externas,
       horasTotales: row.horas_totales,
       participaciones: row.participaciones,
+      horasManuales: row.horas_manuales,
     };
   },
 

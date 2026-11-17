@@ -479,14 +479,15 @@ ON CONFLICT (student_id, project_id) DO UPDATE
 
 -- 5.8 Libro mayor de horas: un movimiento por participación con horas > 0.
 -- solicitud_id determinista (md5 del origen) → reejecutar no duplica horas.
-INSERT INTO hour_movements (enrollment_id, horas, naturaleza, fecha_horas, descripcion, solicitud_id)
+INSERT INTO hour_movements (enrollment_id, horas, naturaleza, fecha_horas, descripcion, solicitud_id, origen)
 SELECT
     pe.id,
     v.horas,
     p.naturaleza,
     v.fecha_fin,
     format('Carga histórica CSS: %s, p. %s', v.archivo, v.pagina),
-    md5(format('etl-css|%s|%s|%s', v.carnet, v.cod_institucion, v.correlativo))::uuid
+    md5(format('etl-css|%s|%s|%s', v.carnet, v.cod_institucion, v.correlativo))::uuid,
+    'IMPORTACION'
 FROM staging.v_pdf_ok v
 JOIN students s             ON s.carnet = v.carnet
 JOIN institutions i         ON i.codigo_css = v.cod_institucion

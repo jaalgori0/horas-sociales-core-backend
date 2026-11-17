@@ -133,10 +133,11 @@ SELECT count(*)::int AS n FROM ins;
 -- @step movimientos_de_horas
 -- solicitud_id determinista con el mismo formato del ETL histórico: nunca duplica horas.
 WITH ins AS (
-    INSERT INTO hour_movements (enrollment_id, horas, naturaleza, fecha_horas, descripcion, solicitud_id)
+    INSERT INTO hour_movements (enrollment_id, horas, naturaleza, fecha_horas, descripcion, solicitud_id, origen)
     SELECT n.enrollment_id, t.horas, p.naturaleza, t.fecha_fin,
            format('Importación %s: %s, p. %s', fn_import_actual(), t.archivo, t.pagina),
-           md5(format('etl-css|%s|%s|%s', t.carnet, t.cod_institucion, t.correlativo))::uuid
+           md5(format('etl-css|%s|%s|%s', t.carnet, t.cod_institucion, t.correlativo))::uuid,
+           'IMPORTACION'
     FROM t_enr_c t
     JOIN students s     ON s.carnet = t.carnet
     JOIN institutions i ON i.codigo_css = t.cod_institucion

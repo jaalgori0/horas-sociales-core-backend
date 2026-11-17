@@ -6,9 +6,15 @@
  * middleware global de errores: no hace falta try/catch ni next(err).
  */
 import type { Request, Response } from 'express';
+import { actorOf } from '../../../core/server/middlewares/require-auth.js';
 import { studentsService } from '../services/students.service.js';
+import { studentProfileService } from '../services/student-profile.service.js';
 import {
+  createManualHoursSchema,
   createStudentSchema,
+  hourMovementParamsSchema,
+  idempotencyKeySchema,
+  studentCarnetParamsSchema,
   listStudentsQuerySchema,
   studentIdParamsSchema,
   updateStudentSchema,
@@ -46,5 +52,42 @@ export const studentsController = {
     const { id } = studentIdParamsSchema.parse(req.params);
     await studentsService.remove(id);
     res.status(204).end();
+  },
+
+  // ─── Perfil y horas manuales (rutas con requireAuth) ──────────────────────
+
+  async getByCarnet(req: Request, res: Response): Promise<void> {
+    const { carnet } = studentCarnetParamsSchema.parse(req.params);
+    res.json({ data: await studentProfileService.findIdByCarnet(carnet) });
+  },
+
+  async getProfile(req: Request, res: Response): Promise<void> {
+    const { id } = studentIdParamsSchema.parse(req.params);
+    res.json({ data: await studentProfileService.getProfile(id) });
+  },
+
+  async listHourMovements(req: Request, res: Response): Promise<void> {
+    const { id } = studentIdParamsSchema.parse(req.params);
+    res.json({ data: await studentProfileService.listMovements(id) });
+  },
+
+  async addManualHours(req: Request, res: Response): Promise<void> {
+    const { id } = studentIdParamsSchema.parse(req.params);
+    const input = createManualHoursSchema.parse(req.body);
+    const idempotencyKey = idempotencyKeySchema.parse(req.get('Idempotency-Key') || undefined) ?? null;
+    const result = await studentProfileService.addManualHours(id, input, {
+      userId: req.user!.id,
+      actor: actorOf(req.user),
+      idempotencyKey,
+    });
+    res
+      .status(result.replayed ? 200 : 201)
+      .json({ data: result.profile, meta: { movementId: result.movementId, replayed: result.replayed } });
+  },
+
+  async deleteManualHours(req: Request, res: Response): Promise<void> {
+    const { id, movementId } = hourMovementParamsSchema.parse(req.params);
+    const result = await studentProfileService.deleteManualMovement(id, movementId, { actor: actorOf(req.user) });
+    res.json({ data: result.profile, meta: { movementId, deletedEnrollment: result.deletedEnrollment } });
   },
 };

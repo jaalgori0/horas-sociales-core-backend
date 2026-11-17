@@ -24,6 +24,8 @@
     "etl:staging:load": "tsx src/etl/staging.ts load",
     "etl:staging:drop": "tsx src/etl/staging.ts drop",
     "etl:transform": "tsx src/etl/transform.ts",
+    "etl:enrich": "tsx src/etl/enrich.ts",
+    "etl:enrich:prod": "node dist/etl/enrich.js",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
     "docker:reset": "docker compose down -v && docker compose up -d",

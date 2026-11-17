@@ -3,7 +3,8 @@
  *
  *   createPreview  archivos → filas del lote → clasificación → vista previa (no toca el maestro)
  *   confirm        advisory lock → reclasifica → si la clasificación cambió, 409 con la nueva
- *                  vista previa; si no, inserción estricta y lote CONFIRMADO
+ *                  vista previa; si no, inserción estricta, enriquecimiento (género y
+ *                  ubicación inferidos, ver enrichment.service.ts) y lote CONFIRMADO
  *   getBatch       lote + archivos + resumen + ítems (filtrables)
  *   discard        descarta una vista previa y libera sus filas
  *
@@ -18,6 +19,7 @@ import { AppError } from '../../../core/errors/app-error.js';
 import { bulkInsert } from '../../../etl/load/staging-loader.js';
 import type { ControlTotal, PdfHourRow, UnparsedLine, XlsProjectRow } from '../../../etl/types.js';
 import { parseUploadedFiles, type ParsedFile, type UploadedFile } from './file-parser.service.js';
+import { enriquecerMaestro } from './enrichment.service.js';
 import { applyBatch, classifyBatch, setBatchContext, type ApplyResult } from './import-sql.js';
 
 /** Distinto del lock de migraciones. Serializa las confirmaciones de importación. */
@@ -455,6 +457,9 @@ export const importsService = {
       }
 
       const resultado = await applyBatch(t);
+      // Los reportes no traen género ni ubicación: se infieren y se completan los vacíos
+      // de todo el maestro (también registros de lotes anteriores), sin pisar valores.
+      Object.assign(resultado, await enriquecerMaestro(t));
       await sequelize.query(
         `UPDATE import_batches
          SET estado = 'CONFIRMADO', confirmado_en = now(), confirmado_por = fn_current_actor(), resultado = :resultado

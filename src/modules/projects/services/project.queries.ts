@@ -16,12 +16,14 @@ import {
   ENROLLMENT_ACTIVE_SQL,
   ENROLLMENT_COUNTED_SQL,
   facultyShortLabel,
+  PROJECT_GEO_JOINS,
   institutionTipoToUI,
   projectStatusFromUI,
   projectStatusSql,
   projectStatusToUI,
   type ProjectStatusUI,
 } from '../../shared/labels.js';
+import { resolverUbicacion } from '../../shared/geo-el-salvador.js';
 import { generoToUI, studentNameSql, type GeneroUI } from '../../students/index.js';
 import type { ListProjectsQuery } from '../schemas/project.schemas.js';
 
@@ -57,6 +59,9 @@ export interface ProjectRow {
   hombres: number;
   mujeres: number;
   total_horas: number;
+  /** Geografía por llave foránea (district_id), si existe. */
+  municipio_fk: string | null;
+  departamento_fk: string | null;
 }
 
 interface EnrollmentRow {
@@ -168,6 +173,16 @@ export interface ProjectMapDTO {
   descripcion: string;
   hombres: number;
   mujeres: number;
+  /**
+   * Lugar resuelto con la misma regla que el dashboard (shared/geo-el-salvador.ts):
+   * es la clave de los marcadores por departamento del mapa. Si no se reconoce,
+   * es el texto tal cual, el país o "Sin ubicación".
+   */
+  departamento: string;
+  /** Municipio de El Salvador, si se conoce. */
+  municipio: string | null;
+  /** `departamento` es uno de los 14 departamentos (tiene marcador en el mapa). */
+  enMapa: boolean;
 }
 
 // ─── SQL base ────────────────────────────────────────────────────────────────
@@ -194,9 +209,11 @@ const PROJECT_BASE_SQL = `
          COALESCE(st.ocupados, 0)::int AS ocupados,
          COALESCE(st.hombres, 0)::int AS hombres,
          COALESCE(st.mujeres, 0)::int AS mujeres,
-         COALESCE(hr.total_horas, 0)::int AS total_horas
+         COALESCE(hr.total_horas, 0)::int AS total_horas,
+         gm.nombre AS municipio_fk, gdep.nombre AS departamento_fk
   FROM projects p
   JOIN institutions i ON i.id = p.institution_id
+  ${PROJECT_GEO_JOINS}
   LEFT JOIN LATERAL (
       SELECT f.id, f.nombre FROM faculties f WHERE f.id = p.faculty_id
       UNION ALL
@@ -360,6 +377,7 @@ export function toDetailDTO(row: ProjectRow, estudiantes: ProjectStudentDTO[]): 
 }
 
 export function toMapDTO(row: ProjectRow): ProjectMapDTO {
+  const lugar = resolverUbicacion(row.ubicacion, { municipio: row.municipio_fk, departamento: row.departamento_fk });
   return {
     id: row.id,
     institution: row.institution,
@@ -369,5 +387,8 @@ export function toMapDTO(row: ProjectRow): ProjectMapDTO {
     descripcion: row.descripcion,
     hombres: row.hombres,
     mujeres: row.mujeres,
+    departamento: lugar.departamento,
+    municipio: lugar.municipioConocido ? lugar.municipio : null,
+    enMapa: lugar.departamentoReconocido,
   };
 }

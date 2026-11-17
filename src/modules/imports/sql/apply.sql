@@ -148,3 +148,15 @@ WITH ins AS (
     RETURNING horas
 )
 SELECT count(*)::int AS n, coalesce(sum(horas), 0)::int AS horas FROM ins;
+
+-- @step estados_de_proyecto
+-- Proyectos del lote (existentes o recién insertados): completa el cierre de los que ya no
+-- tienen estudiantes activos y finaliza los vencidos. Ver migración 007.
+SELECT s.finalizados AS n, s.fechas_completadas
+FROM fn_sincronizar_estado_proyectos(
+    ARRAY(SELECT p.id
+          FROM t_proj_c t
+          JOIN institutions i ON i.codigo_css = t.codigo_css
+          JOIN projects p     ON p.institution_id = i.id AND p.correlativo_css = t.correlativo),
+    true
+) s;

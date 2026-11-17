@@ -10,6 +10,7 @@ import { projectStatusFromUI } from '../../shared/labels.js';
 import type { CreateProjectInput, ListProjectsQuery, UpdateProjectInput } from '../schemas/project.schemas.js';
 import { resolveCareerIds, resolveFacultyId } from './catalog-resolver.js';
 import { enrollmentsService } from './enrollments.service.js';
+import { syncProjectStatus } from './project-status.service.js';
 import {
   fetchProjectRows,
   fetchProjectStudents,
@@ -60,6 +61,56 @@ function projectColumns(input: UpdateProjectInput): Record<string, unknown> {
   const estado = resolveEstado(input);
   if (estado !== undefined) columns.estado = estado;
   return columns;
+}
+
+/**
+ * Tras crear o editar: un proyecto ACTIVO con cierre vencido pasa a FINALIZADO
+ * (caso "edité la fecha de cierre a una pasada"). Si el cliente pidió ACTIVO de
+ * forma explícita con un cierre vencido, la combinación es contradictoria: 422.
+ */
+async function applyStatusRules(projectId: string, input: UpdateProjectInput, t: Transaction): Promise<void> {
+  if (resolveEstado(input) === 'ACTIVO') {
+    const row = await selectOne<{ vencido: boolean; fecha_cierre: string }>(
+      `SELECT fecha_cierre <= (now() AT TIME ZONE 'America/El_Salvador')::date AS vencido,
+              to_char(fecha_cierre, 'YYYY-MM-DD') AS fecha_cierre
+       FROM projects WHERE id = :projectId`,
+      { projectId },
+      t,
+    );
+    if (row?.vencido) {
+      throw AppError.unprocessable(
+        'Un proyecto con la fecha de cierre vencida no puede quedar Activo: extienda la fecha de cierre o márquelo como Cerrado',
+        { fechaCierre: row.fecha_cierre },
+      );
+    }
+  }
+  await syncProjectStatus({ ids: [projectId] }, t);
+}
+
+/**
+ * Reapertura al editar: si la fecha de cierre CAMBIÓ a una futura y el proyecto
+ * estaba FINALIZADO, vuelve a ACTIVO. Solo cuando cambia la fecha (el modal reenvía
+ * siempre la fecha actual: editar el título no reabre un proyecto cerrado a mano),
+ * solo desde FINALIZADO (CANCELADO es una decisión explícita) y solo si el cliente
+ * no pidió un estado en la misma edición.
+ */
+async function reopenIfClosingExtended(
+  projectId: string,
+  input: UpdateProjectInput,
+  previousFechaCierre: string | null,
+  t: Transaction,
+): Promise<void> {
+  if (input.fechaCierre === undefined || resolveEstado(input) !== undefined) return;
+  await execReturning(
+    `UPDATE projects SET estado = 'ACTIVO'
+     WHERE id = :projectId
+       AND estado = 'FINALIZADO'
+       AND fecha_cierre > (now() AT TIME ZONE 'America/El_Salvador')::date
+       AND fecha_cierre IS DISTINCT FROM CAST(:previousFechaCierre AS date)
+     RETURNING id`,
+    { projectId, previousFechaCierre },
+    t,
+  );
 }
 
 async function replaceCareers(projectId: string, careerIds: string[], t: Transaction): Promise<void> {
@@ -124,14 +175,16 @@ export const projectsService = {
       for (const student of input.students ?? []) {
         await enrollmentsService.enrollInTransaction(projectId, student, t);
       }
+      // Después de inscribir: un proyecto histórico (cierre pasado) acepta a sus estudiantes y luego se cierra.
+      await applyStatusRules(projectId, input, t);
       return projectsService.getById(projectId, t);
     });
   },
 
   async update(id: string, input: UpdateProjectInput): Promise<ProjectDetailDTO> {
     return withTransaction(async (t) => {
-      const current = await selectOne<{ institution_id: string }>(
-        'SELECT institution_id FROM projects WHERE id = :id FOR UPDATE',
+      const current = await selectOne<{ institution_id: string; fecha_cierre: string | null }>(
+        "SELECT institution_id, to_char(fecha_cierre, 'YYYY-MM-DD') AS fecha_cierre FROM projects WHERE id = :id FOR UPDATE",
         { id },
         t,
       );
@@ -163,6 +216,8 @@ export const projectsService = {
           { ...columns, id },
           t,
         );
+        await reopenIfClosingExtended(id, input, current.fecha_cierre, t);
+        await applyStatusRules(id, input, t);
       }
 
       const careerIds = await resolveCareerIds(input, t);

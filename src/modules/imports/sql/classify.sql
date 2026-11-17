@@ -257,7 +257,7 @@ FROM t_pdf_ok
 ORDER BY carnet, id;
 
 CREATE TEMP TABLE t_enr ON COMMIT DROP AS
-SELECT id, archivo, pagina, carnet, nombre_completo, cod_institucion, correlativo, proyecto_nombre,
+SELECT id, archivo, pagina, linea, carnet, nombre_completo, cod_institucion, correlativo, proyecto_nombre,
        career_id, estado, estado_reporte, horas, fecha_inicio, fecha_fin, advertencias,
        fn_import_inicio_dia(fecha_inicio) AS asignada_en,
        -- Activo → sin cierre. FINALIZADA/RETIRADA → cierre = fecha de fin.
@@ -473,9 +473,13 @@ CROSS JOIN LATERAL (
             CASE WHEN b.enrollment_id IS NOT NULL AND b.e_asignada <> b.asignada_en THEN 'fecha_inicio_difiere' END,
             CASE WHEN b.enrollment_id IS NOT NULL AND b.e_cerrada IS DISTINCT FROM b.cerrada_en THEN 'fecha_fin_difiere' END
         ], NULL) AS motivos,
-        -- Celdas cuyo corte se estimó por posición: se cargan, pero conviene mirarlas.
+        -- Se cargan, pero conviene mirarlas: celdas cuyo corte del PDF se estimó por posición y,
+        -- en la plantilla de revisión, valores que Excel había convertido y se recuperaron
+        -- (carnet sin ceros, fecha como número de serie) o filas agregadas a mano.
         ARRAY(SELECT DISTINCT w FROM unnest(b.advertencias) w
-              WHERE w LIKE 'celda_dividida_por_posicion:%' OR w = 'fila_cortada_entre_paginas') AS avisos,
+              WHERE w LIKE 'celda_dividida_por_posicion:%' OR w = 'fila_cortada_entre_paginas'
+                 OR w = 'carnet_completado_con_ceros' OR w LIKE 'fecha_leida_como_fecha_de_excel:%'
+                 OR w = 'fila_agregada_en_revision') AS avisos,
         CASE WHEN b.enrollment_id IS NOT NULL THEN jsonb_build_object(
             'id', b.enrollment_id, 'estado', b.e_estado, 'horas', b.e_horas,
             'asignadaEn', b.e_asignada, 'cerradaEn', b.e_cerrada) END AS existente
@@ -521,6 +525,6 @@ SELECT fn_import_actual(), 'PARTICIPACION', carnet || '@' || cod_institucion || 
                           'codigoCss', cod_institucion, 'correlativo', correlativo, 'proyecto', proyecto_nombre,
                           'estado', estado, 'estadoReporte', estado_reporte, 'horas', horas,
                           'fechaInicio', fecha_inicio, 'fechaFin', fecha_fin,
-                          'archivo', archivo, 'pagina', pagina),
+                          'archivo', archivo, 'pagina', pagina, 'linea', linea),
        existente, enrollment_id, ARRAY[id]
 FROM t_enr_c;

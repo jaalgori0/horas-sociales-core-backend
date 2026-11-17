@@ -17,10 +17,11 @@ import { sequelize } from '../../../core/config/database.js';
 import { execReturning, selectAll, selectOne, withTransaction } from '../../../core/database/sql.js';
 import { AppError } from '../../../core/errors/app-error.js';
 import { bulkInsert } from '../../../etl/load/staging-loader.js';
-import type { ControlTotal, PdfHourRow, UnparsedLine, XlsProjectRow } from '../../../etl/types.js';
+import { isHourDetailSource, type ControlTotal, type PdfHourRow, type UnparsedLine, type XlsProjectRow } from '../../../etl/types.js';
 import { parseUploadedFiles, type ParsedFile, type UploadedFile } from './file-parser.service.js';
 import { enriquecerMaestro } from './enrichment.service.js';
 import { applyBatch, classifyBatch, setBatchContext, type ApplyResult } from './import-sql.js';
+import { buildReviewTemplate, needsReview } from '../../../etl/extract/xlsx-plantilla-revision.js';
 
 /** Distinto del lock de migraciones. Serializa las confirmaciones de importación. */
 const CONFIRM_LOCK_KEY = 7_264_031_118;
@@ -64,7 +65,7 @@ function reconcile(file: Extract<ParsedFile, { estado: 'procesado' }>): Concilia
     ok: reporte === null || reporte === extraido,
   });
 
-  if (extraction.file.tipo === 'PDF_DETALLE_HORAS') {
+  if (isHourDetailSource(extraction.file.tipo)) {
     return [
       check('alumnos', extraction.pdfRows.length, total('ALUMNOS')),
       check('horas', extraction.pdfRows.reduce((sum, r) => sum + (toInt(r.horasAsignadas) ?? 0), 0), total('HORAS')),
@@ -365,7 +366,64 @@ export type BatchDetailDTO = Awaited<ReturnType<typeof getBatch>>;
 // -----------------------------------------------------------------------------
 // API del servicio
 // -----------------------------------------------------------------------------
+export interface ReviewTemplateResult {
+  buffer: Buffer;
+  filename: string;
+  filas: number;
+  /** Filas marcadas «Revisar» en la plantilla (ver needsReview). */
+  filasConAdvertencias: number;
+  lineasNoReconocidas: number;
+}
+
+/** "plantilla-revision-20261118-0930.xlsx" en hora de El Salvador. */
+function reviewTemplateFilename(now: Date): string {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/El_Salvador', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(now).map((p) => [p.type, p.value]),
+  );
+  return `plantilla-revision-${parts.year}${parts.month}${parts.day}-${parts.hour}${parts.minute}.xlsx`;
+}
+
 export const importsService = {
+  /**
+   * PDF «Detalle de Horas por Proyecto» → plantilla Excel para revisar y corregir a mano
+   * antes de importar (ver etl/extract/xlsx-plantilla-revision.ts). No toca la base.
+   */
+  async buildReviewTemplate(files: readonly UploadedFile[]): Promise<ReviewTemplateResult> {
+    const parsed = await parseUploadedFiles(files);
+    const pdfs: Array<Extract<ParsedFile, { estado: 'procesado' }>> = [];
+    const rechazados: Array<{ archivo: string; motivo: string }> = [];
+    for (const file of parsed) {
+      if (file.estado === 'rechazado') {
+        rechazados.push({ archivo: file.archivo, motivo: file.motivo });
+      } else if (file.extraction.file.tipo !== 'PDF_DETALLE_HORAS') {
+        rechazados.push({
+          archivo: file.archivo,
+          motivo: 'La plantilla solo se genera desde los PDF «Detalle de Horas por Proyecto». Suba este archivo directamente en la importación.',
+        });
+      } else {
+        pdfs.push(file);
+      }
+    }
+    if (pdfs.length === 0) {
+      throw AppError.unprocessable('Ninguno de los archivos es un PDF «Detalle de Horas por Proyecto» válido.', { rechazados });
+    }
+
+    const extractions = pdfs.map((f) => f.extraction);
+    const now = new Date();
+    const buffer = buildReviewTemplate({ extractions, rechazados, generadoEn: now });
+    const rows = extractions.flatMap((e) => e.pdfRows);
+    return {
+      buffer,
+      filename: reviewTemplateFilename(now),
+      filas: rows.length,
+      filasConAdvertencias: rows.filter((r) => needsReview(r.advertencias)).length,
+      lineasNoReconocidas: extractions.reduce((sum, e) => sum + e.unparsed.length, 0),
+    };
+  },
+
   /** `actor`: quién sube (queda en creado_por vía fn_current_actor()). */
   async createPreview(files: readonly UploadedFile[], actor: string): Promise<BatchDetailDTO> {
     const parsed = await parseUploadedFiles(files);

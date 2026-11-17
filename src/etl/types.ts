@@ -3,7 +3,18 @@
  * Todos los campos de datos son `string | null` en bruto: la interpretación se hace en SQL.
  */
 
-export type SourceFileType = 'PDF_DETALLE_HORAS' | 'XLS_MEMORIA_LABORES';
+/**
+ * PDF_DETALLE_HORAS        PDF oficial «Detalle de Horas por Proyecto».
+ * XLS_MEMORIA_LABORES      Excel oficial «Memoria de Labores del CSS».
+ * XLSX_PLANTILLA_REVISION  Excel generado por el sistema desde los PDF (POST /imports/review-template)
+ *                          y corregido a mano: trae las mismas filas que el PDF.
+ */
+export type SourceFileType = 'PDF_DETALLE_HORAS' | 'XLS_MEMORIA_LABORES' | 'XLSX_PLANTILLA_REVISION';
+
+/** Tipos que producen filas de horas por estudiante (PdfHourRow) y se concilian igual que el PDF. */
+export function isHourDetailSource(tipo: SourceFileType): boolean {
+  return tipo === 'PDF_DETALLE_HORAS' || tipo === 'XLSX_PLANTILLA_REVISION';
+}
 
 export interface SourceFileRecord {
   archivo: string;

@@ -25,6 +25,7 @@ import {
 } from '../types.js';
 import { extractPdfHoursReport } from './pdf-hours-report.js';
 import { extractXlsMemoriaLabores } from './xls-memoria-labores.js';
+import { extractReviewTemplate, isReviewTemplate, type TemplateOrigin } from './xlsx-plantilla-revision.js';
 
 export type SourceKind = 'PDF' | 'XLS';
 
@@ -35,6 +36,8 @@ export interface FileExtraction {
   xlsRows: XlsProjectRow[];
   controlTotals: ControlTotal[];
   unparsed: UnparsedLine[];
+  /** Solo la plantilla de revisión: PDF de los que salió (ver xlsx-plantilla-revision.ts). */
+  origenes?: TemplateOrigin[];
 }
 
 const SIGNATURES: ReadonlyArray<[kind: SourceKind, bytes: readonly number[]]> = [
@@ -82,6 +85,19 @@ export async function extractFile(nombre: string, data: Uint8Array): Promise<Fil
       xlsRows: [],
       controlTotals: extraction.controlTotals,
       unparsed: extraction.unparsed,
+    };
+  }
+
+  // Plantilla de revisión generada por el sistema (hoja oculta de control): filas de horas como el PDF.
+  if (isReviewTemplate(data)) {
+    const template = extractReviewTemplate(archivo, data);
+    return {
+      file: { ...template.file, sha256 },
+      pdfRows: template.rows,
+      xlsRows: [],
+      controlTotals: template.controlTotals,
+      unparsed: template.unparsed,
+      origenes: template.origenes,
     };
   }
 

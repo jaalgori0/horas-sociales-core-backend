@@ -8,11 +8,14 @@ import { assertSecurityConfig } from './core/security/crypto.js';
 import { assertAuthConfig } from './core/security/token.js';
 import { createApp } from './core/server/app.js';
 import { logger } from './core/logger.js';
+import { ensureDefaultAdmin } from './modules/auth/index.js';
 
 async function bootstrap(): Promise<void> {
   assertSecurityConfig();
   assertAuthConfig();
   await assertDatabaseConnection();
+  // Idempotente: crea el ADMIN por defecto solo si su correo no existe (ver default-admin.ts).
+  await ensureDefaultAdmin();
 
   const app = createApp();
   const server = app.listen(env.PORT, () => {

@@ -178,14 +178,17 @@ export const projectsService = {
    */
   async remove(id: string): Promise<{ deleted: true; projectId: string }> {
     return withTransaction(async (t) => {
-      const row = await selectOne<{ id: string; movimientos: number }>(
-        `SELECT p.id, (SELECT count(*) FROM hour_movements hm JOIN project_enrollments pe ON pe.id = hm.enrollment_id
+      const row = await selectOne<{ id: string; movimientos: number; es_sistema: boolean }>(
+        `SELECT p.id, (p.atributos ? 'sistema') AS es_sistema, (SELECT count(*) FROM hour_movements hm JOIN project_enrollments pe ON pe.id = hm.enrollment_id
                         WHERE pe.project_id = p.id)::int AS movimientos
          FROM projects p WHERE p.id = :id FOR UPDATE`,
         { id },
         t,
       );
       if (!row) throw AppError.notFound('Proyecto no encontrado');
+      if (row.es_sistema) {
+        throw AppError.conflict('Este es un proyecto interno del sistema (asignaciones manuales) y no se puede eliminar');
+      }
       if (row.movimientos > 0) {
         throw AppError.conflict(
           'El proyecto tiene horas sociales registradas (historial académico) y no se puede eliminar; márquelo como Cerrado',

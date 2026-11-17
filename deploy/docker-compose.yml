@@ -1,0 +1,85 @@
+# =============================================================================
+# Horas Sociales UCA — despliegue completo (base de datos + API + frontend)
+#
+# Este archivo se versiona en horas-sociales-core-backend/deploy/. Para usarlo,
+# COPIE este archivo y `.env.example` a la carpeta PADRE que contiene ambos
+# repositorios como hermanos:
+#
+#   ./docker-compose.yml                       ← este archivo
+#   ./.env                                     ← copia de .env.example con secretos
+#   ./horas-sociales-core-backend/
+#   ./Proyecto-de-horas-sociales-frontend/     (o el nombre que indique FRONTEND_DIR)
+#
+# Uso:   docker compose up -d --build
+# Abrir: http://localhost:8080   (o http://<IP-del-equipo>:8080 desde la red)
+#
+# Solo el frontend se publica. Nginx reenvía /api al backend por la red interna;
+# PostgreSQL y la API no quedan expuestos fuera de Docker. El backend aplica las
+# migraciones pendientes en cada arranque y crea el ADMIN por defecto si no existe.
+# =============================================================================
+
+name: horas-sociales-uca
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-horas_sociales}
+      POSTGRES_USER: ${DB_USER:-horas_sociales}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Defina DB_PASSWORD en el archivo .env}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C.UTF-8"
+      TZ: America/El_Salvador
+      PGTZ: America/El_Salvador
+    volumes:
+      # Volumen con nombre fijo: los datos sobreviven a `docker compose down` y a reconstrucciones.
+      # (`docker compose down -v` SÍ lo borra.)
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  backend:
+    build:
+      context: ./horas-sociales-core-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      API_PREFIX: /api/v1
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Mismo origen vía Nginx: CORS solo para accesos directos de herramientas.
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-horas_sociales}
+      DB_USER: ${DB_USER:-horas_sociales}
+      DB_PASSWORD: ${DB_PASSWORD:?Defina DB_PASSWORD en el archivo .env}
+      AUTH_SECRET: ${AUTH_SECRET:?Defina AUTH_SECRET en el archivo .env}
+      # Cerrado por defecto: sin registro público de cuentas.
+      AUTH_ALLOW_REGISTER: ${AUTH_ALLOW_REGISTER:-false}
+      AUTH_TOKEN_TTL_HOURS: ${AUTH_TOKEN_TTL_HOURS:-8}
+      DUI_HASH_KEY: ${DUI_HASH_KEY:?Defina DUI_HASH_KEY en el archivo .env}
+      DUI_ENCRYPTION_KEY: ${DUI_ENCRYPTION_KEY:?Defina DUI_ENCRYPTION_KEY en el archivo .env}
+
+  frontend:
+    build:
+      context: ./${FRONTEND_DIR:-Proyecto-de-horas-sociales-frontend}
+      args:
+        VITE_API_URL: /api/v1
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+
+volumes:
+  pgdata:
+    name: horas-sociales-uca-pgdata

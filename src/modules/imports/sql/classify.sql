@@ -446,13 +446,16 @@ UPDATE t_stud_c SET
 --   • Nueva para ese estudiante → entra y suma al historial (sin topes de 300/600 h).
 --   • Ya existe e igual (estado, fechas, horas) → IGNORADO.
 --   • Ya existe con datos distintos → CONFLICTO: no se sobrescribe, se revisa a mano.
+--   • Las horas comparadas excluyen las de origen MANUAL (correcciones desde el perfil).
 CREATE TEMP TABLE t_enr_c ON COMMIT DROP AS
 WITH base AS (
     SELECT e.*,
            pc.project_id, pc.estado AS proj_estado,
            sc.student_id, sc.estado AS stud_estado,
            pe.id AS enrollment_id, pe.estado AS e_estado, pe.asignada_en AS e_asignada, pe.cerrada_en AS e_cerrada,
-           (SELECT coalesce(sum(hm.horas), 0)::integer FROM hour_movements hm WHERE hm.enrollment_id = pe.id) AS e_horas
+           -- Solo horas del CSS: las asignaciones MANUAL (migración 005) no entran en la conciliación.
+           (SELECT coalesce(sum(hm.horas), 0)::integer FROM hour_movements hm
+             WHERE hm.enrollment_id = pe.id AND hm.origen <> 'MANUAL') AS e_horas
     FROM t_enr e
     JOIN t_proj_c pc ON pc.codigo_css = e.cod_institucion AND pc.correlativo = e.correlativo
     JOIN t_stud_c sc ON sc.carnet = e.carnet

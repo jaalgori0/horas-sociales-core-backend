@@ -180,3 +180,30 @@ Todo lo que inserta el ETL queda en `auditoria` con `actor = 'etl:css-historico'
    - `src/etl/sql/staging_schema.sql`
    - `src/etl/sql/transform_load.sql`
    - `src/database/migrations/002_*.sql` y `003_*.sql`
+
+---
+
+## 9. Enriquecimiento: género y ubicación inferidos
+
+Los reportes del CSS no traen **género** del estudiante ni **ubicación** de la institución. Sin ellos, el dashboard muestra "Sin dato" y "Sin ubicación". Cada importación confirmada (`POST /imports/:id/confirm`) los completa automáticamente; para datos ya cargados se usa:
+
+```bash
+pnpm etl:enrich                      # en seco: lista qué se completaría y qué queda pendiente
+pnpm etl:enrich --aplicar            # escribe (una transacción, auditoría actor = 'etl:enriquecimiento')
+# En el contenedor de producción:
+docker compose exec backend node dist/etl/enrich.js --aplicar
+```
+
+| Dato | Reglas (en orden) | Código |
+|---|---|---|
+| `students.genero` | Diccionario de nombres comunes → terminación A (MUJER) / O (HOMBRE) con excepciones → segundo nombre. Unisex o desconocido → queda `NULL`. | `src/modules/shared/genero-por-nombre.ts` |
+| `institutions.ubicacion` | Regla en `institution_location_rules` por `codigo_css` → topónimo inequívoco en el nombre → sede UCA. | `src/modules/shared/ubicacion-por-texto.ts` |
+| `projects.ubicacion` | Topónimo en el título → ubicación de su institución. | `src/modules/imports/services/enrichment.service.ts` |
+
+- Solo se llenan valores **vacíos** (y sin `district_id`): nunca se sobrescribe lo existente ni lo editado en la app.
+- Se recorre **todo** el maestro, no solo el lote: reimportar rellena también registros antiguos.
+- Para ubicar una institución recurrente que queda pendiente (el modo en seco lista las que más proyectos afectan):
+  ```sql
+  INSERT INTO institution_location_rules (codigo_css, ubicacion) VALUES ('1234', 'Soyapango, San Salvador');
+  ```
+  y ejecute `pnpm etl:enrich --aplicar`. Formato: `"Municipio, Departamento"`; el departamento se deriva de ahí.

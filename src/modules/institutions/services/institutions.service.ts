@@ -32,6 +32,10 @@ export interface InstitutionListDTO {
   codigoCss: string | null;
   tipo: string | null;
   ubicacion: string;
+  direccion: string | null;
+  contactoNombre: string | null;
+  contactoEmail: string | null;
+  telefono: string | null;
   image: string | null;
   totalProyectos: number;
   totalProyectosActivos: number;
@@ -52,7 +56,6 @@ export interface InstitutionProjectDTO {
 
 export interface InstitutionDetailDTO extends InstitutionListDTO {
   descripcion: string;
-  direccion: string | null;
   totalCarrerasAplicables: number;
   proyectosGenerales: InstitutionProjectDTO[];
   proyectosActivos: InstitutionProjectDTO[];
@@ -69,6 +72,9 @@ interface InstitutionRow {
   ubicacion: string | null;
   direccion: string | null;
   descripcion: string | null;
+  contacto_nombre: string | null;
+  contacto_email: string | null;
+  telefono: string | null;
   image_url: string | null;
   total_proyectos: number;
   total_proyectos_activos: number;
@@ -79,7 +85,8 @@ interface InstitutionRow {
 
 /** Institución + contadores. `extraWhere` usa parámetros con nombre. */
 const INSTITUTION_SELECT = `
-  SELECT i.id, i.nombre, i.sigla, i.codigo_css, i.tipo, i.ubicacion, i.direccion, i.descripcion, i.image_url,
+  SELECT i.id, i.nombre, i.sigla, i.codigo_css, i.tipo, i.ubicacion, i.direccion, i.descripcion,
+         i.contacto_nombre, i.contacto_email, i.telefono, i.image_url,
          (SELECT count(*) FROM projects p WHERE p.institution_id = i.id)::int AS total_proyectos,
          (SELECT count(*) FROM projects p WHERE p.institution_id = i.id AND p.estado = 'ACTIVO')::int
            AS total_proyectos_activos,
@@ -105,6 +112,10 @@ function toListDTO(row: InstitutionRow): InstitutionListDTO {
     codigoCss: row.codigo_css,
     tipo: institutionTipoToUI(row.tipo),
     ubicacion: row.ubicacion ?? '',
+    direccion: row.direccion,
+    contactoNombre: row.contacto_nombre,
+    contactoEmail: row.contacto_email,
+    telefono: row.telefono,
     image: row.image_url,
     totalProyectos: row.total_proyectos,
     totalProyectosActivos: row.total_proyectos_activos,
@@ -145,6 +156,9 @@ function toColumns(input: Partial<CreateInstitutionInput>): Record<string, unkno
   if (input.ubicacion !== undefined) columns.ubicacion = input.ubicacion;
   if (input.direccion !== undefined) columns.direccion = input.direccion;
   if (input.descripcion !== undefined) columns.descripcion = input.descripcion;
+  if (input.contactoNombre !== undefined) columns.contacto_nombre = input.contactoNombre;
+  if (input.contactoEmail !== undefined) columns.contacto_email = input.contactoEmail;
+  if (input.telefono !== undefined) columns.telefono = input.telefono;
   const image = input.image_url !== undefined ? input.image_url : input.image;
   if (image !== undefined) columns.image_url = image;
   return columns;
@@ -162,6 +176,17 @@ async function insertInstitution(columns: Record<string, unknown>, t: Transactio
   return row!.id;
 }
 
+/** 409 legible antes de chocar con uq_institutions_nombre (nombre sin tildes ni mayúsculas). */
+async function assertNombreDisponible(nombre: string, exceptId: string | null, t: Transaction): Promise<void> {
+  const dup = await selectOne<{ id: string }>(
+    `SELECT id FROM institutions
+     WHERE nombre_normalizado = fn_normalize_text(:nombre) AND (CAST(:exceptId AS uuid) IS NULL OR id <> CAST(:exceptId AS uuid))`,
+    { nombre, exceptId },
+    t,
+  );
+  if (dup) throw AppError.conflict('Ya existe una institución con ese nombre', { institutionId: dup.id });
+}
+
 export const institutionsService = {
   async list(query: ListInstitutionsQuery): Promise<InstitutionListDTO[]> {
     const tipo = query.type && query.type !== 'Todos' ? institutionTipoFromUI(query.type) : null;
@@ -170,7 +195,8 @@ export const institutionsService = {
       `${INSTITUTION_SELECT}
        WHERE (CAST(:tipo AS text) IS NULL OR i.tipo = :tipo)
          AND (CAST(:search AS text) IS NULL OR
-              fn_normalize_text(concat_ws(' ', i.nombre, i.sigla, i.ubicacion, i.descripcion, i.codigo_css))
+              fn_normalize_text(concat_ws(' ', i.nombre, i.sigla, i.ubicacion, i.descripcion, i.codigo_css,
+                                          i.contacto_nombre))
                 LIKE fn_normalize_text(:search) ESCAPE '\\')
        ORDER BY i.nombre_normalizado ${query.sortBy === 'nombre-desc' ? 'DESC' : 'ASC'}`,
       { tipo, search },
@@ -184,7 +210,6 @@ export const institutionsService = {
     return {
       ...toListDTO(row),
       descripcion: row.descripcion ?? '',
-      direccion: row.direccion,
       totalCarrerasAplicables: row.total_carreras,
       proyectosGenerales: proyectos,
       proyectosActivos: proyectos.filter((p) => p.estadoProyecto === 'Activo'),
@@ -195,6 +220,7 @@ export const institutionsService = {
 
   async create(input: CreateInstitutionInput): Promise<InstitutionDetailDTO> {
     return withTransaction(async (t) => {
+      await assertNombreDisponible(input.nombre, null, t);
       const id = await insertInstitution(toColumns(input), t);
       return institutionsService.getById(id, t);
     });
@@ -203,6 +229,7 @@ export const institutionsService = {
   async update(id: string, input: UpdateInstitutionInput): Promise<InstitutionDetailDTO> {
     return withTransaction(async (t) => {
       await findRow(id, t);
+      if (input.nombre !== undefined) await assertNombreDisponible(input.nombre, id, t);
       const columns = toColumns(input);
       const names = Object.keys(columns);
       if (names.length > 0) {

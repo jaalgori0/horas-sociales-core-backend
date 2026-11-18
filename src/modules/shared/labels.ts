@@ -24,6 +24,25 @@ export function projectStatusSql(alias: string): string {
             ELSE 'En progreso' END`;
 }
 
+// ─── Clasificación de proyecto (migración 008, no excluyentes) ───────────────
+export const PROJECT_CLASIFICACIONES = ['SS_INTERNO', 'SS_EXTERNO', 'PROFESIONALIZANTE', 'CONTACTO_REALIDAD'] as const;
+export type ProjectClasificacion = (typeof PROJECT_CLASIFICACIONES)[number];
+
+export const PROJECT_CLASIFICACION_LABELS: Record<ProjectClasificacion, string> = {
+  SS_INTERNO: 'Servicio social interno',
+  SS_EXTERNO: 'Servicio social externo',
+  PROFESIONALIZANTE: 'Profesionalizante',
+  CONTACTO_REALIDAD: 'Contacto con la realidad',
+};
+
+/**
+ * Naturaleza de las horas según las clasificaciones (misma regla que
+ * fn_project_sync_naturaleza en 008): con SS_INTERNO → INTERNA; si no, EXTERNA.
+ */
+export function naturalezaFromClasificaciones(clasificaciones: readonly string[]): 'INTERNA' | 'EXTERNA' {
+  return clasificaciones.includes('SS_INTERNO') ? 'INTERNA' : 'EXTERNA';
+}
+
 /**
  * UI → BD. Acepta las etiquetas del frontend (incluidas las heredadas
  * "En planificación"/"En convocatoria") o el código de la BD.

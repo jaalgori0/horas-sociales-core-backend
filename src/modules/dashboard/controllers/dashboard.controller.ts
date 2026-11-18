@@ -33,6 +33,9 @@ export const dashboardController = {
     const { limit } = tablaQuerySchema.parse(req.query);
     res.json(await dashboardService.tablaInstitucion(limit));
   },
+  async estudiantesMultiProyecto(_req: Request, res: Response): Promise<void> {
+    res.json(await dashboardService.estudiantesMultiProyecto());
+  },
   async generoPorDepartamento(_req: Request, res: Response): Promise<void> {
     res.json(await dashboardService.generoPorDepartamento());
   },

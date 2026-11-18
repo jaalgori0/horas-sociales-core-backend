@@ -21,6 +21,7 @@ import {
   projectStatusFromUI,
   projectStatusSql,
   projectStatusToUI,
+  type ProjectClasificacion,
   type ProjectStatusUI,
 } from '../../shared/labels.js';
 import { resolverUbicacion } from '../../shared/geo-el-salvador.js';
@@ -44,6 +45,7 @@ export interface ProjectRow {
   area_css: string | null;
   correlativo_css: string | null;
   naturaleza: string;
+  clasificaciones: ProjectClasificacion[];
   institution_id: string;
   institution: string;
   institution_tipo: string | null;
@@ -154,6 +156,10 @@ export interface ProjectListDTO {
   totalHoras: number;
   area: string | null;
   correlativoCss: string | null;
+  /** Códigos (SS_INTERNO, SS_EXTERNO, PROFESIONALIZANTE, CONTACTO_REALIDAD), orden fijo. */
+  clasificaciones: ProjectClasificacion[];
+  /** Naturaleza con la que se registran las horas (derivada de las clasificaciones). */
+  naturaleza: string;
 }
 
 export interface ProjectDetailDTO extends ProjectListDTO {
@@ -203,6 +209,9 @@ const PROJECT_BASE_SQL = `
                    JOIN students s ON s.id = pe.student_id JOIN careers c ON c.id = s.career_id
                   WHERE pe.project_id = p.id ORDER BY c.nombre)
          ) AS carreras,
+         ARRAY(SELECT pcl.clasificacion FROM project_classifications pcl WHERE pcl.project_id = p.id
+                ORDER BY array_position(ARRAY['SS_INTERNO', 'SS_EXTERNO', 'PROFESIONALIZANTE', 'CONTACTO_REALIDAD'],
+                                        pcl.clasificacion)) AS clasificaciones,
          ARRAY(SELECT tm.nombre FROM project_team_members tm WHERE tm.project_id = p.id ORDER BY tm.orden, tm.nombre)
            AS equipo,
          COALESCE(st.asignados, 0)::int AS asignados,
@@ -261,6 +270,7 @@ export async function fetchProjectRows(filters: ProjectFilters, t?: Transaction)
                                         base.correlativo_css)) LIKE fn_normalize_text(:search) ESCAPE '\\')
        AND (CAST(:location AS text) IS NULL OR fn_normalize_text(base.ubicacion) LIKE fn_normalize_text(:location) ESCAPE '\\')
        AND (CAST(:faculty AS text) IS NULL OR fn_normalize_text(base.faculty_nombre) LIKE fn_normalize_text(:faculty) ESCAPE '\\')
+       AND (CAST(:clasificacion AS text[]) IS NULL OR base.clasificaciones && CAST(:clasificacion AS text[]))
      ORDER BY base.orden_fecha DESC NULLS LAST, base.titulo`,
     {
       id: filters.id ?? null,
@@ -269,6 +279,8 @@ export async function fetchProjectRows(filters: ProjectFilters, t?: Transaction)
       search: like(filters.search),
       location: like(filters.location),
       faculty: like(filters.faculty ? facultyShortLabel(filters.faculty) : undefined),
+      // Literal de arreglo de Postgres: los códigos ya vienen validados por el enum de Zod.
+      clasificacion: filters.clasificacion ? `{${filters.clasificacion.join(',')}}` : null,
     },
     t,
   );
@@ -362,6 +374,8 @@ export function toListDTO(row: ProjectRow): ProjectListDTO {
     totalHoras: row.total_horas,
     area: row.area_css,
     correlativoCss: row.correlativo_css,
+    clasificaciones: row.clasificaciones,
+    naturaleza: row.naturaleza,
   };
 }
 

@@ -84,6 +84,8 @@ export interface TrendYearRow {
   horas: number;
 }
 
+export type CarreraAnioMetrica = 'estudiantes' | 'participaciones';
+
 export type CarreraAnioRow = { carrera: string; facultad: string } & Record<string, number | string>;
 
 export interface TablaInstitucionRow {
@@ -127,14 +129,18 @@ export interface DashboardSummary {
 }
 
 export const dashboardService = {
-  async genero(): Promise<GenderSummary> {
+  /** Participantes por género. Con `facultyId`, solo los de esa facultad (por la carrera del estudiante). */
+  async genero(facultyId?: string): Promise<GenderSummary> {
     const row = await selectOne<GenderSummary>(
       `SELECT count(*) FILTER (WHERE s.genero = 'HOMBRE')::int AS hombres,
               count(*) FILTER (WHERE s.genero = 'MUJER')::int  AS mujeres,
               count(*) FILTER (WHERE s.genero IS NULL)::int    AS "sinDato"
        FROM students s
+       JOIN careers c ON c.id = s.career_id
        WHERE EXISTS (SELECT 1 FROM project_enrollments pe
-                      WHERE pe.student_id = s.id AND pe.estado IN ${ENROLLMENT_COUNTED_SQL})`,
+                      WHERE pe.student_id = s.id AND pe.estado IN ${ENROLLMENT_COUNTED_SQL})
+         AND (CAST(:facultyId AS uuid) IS NULL OR c.faculty_id = CAST(:facultyId AS uuid))`,
+      { facultyId: facultyId ?? null },
     );
     return row ?? { hombres: 0, mujeres: 0, sinDato: 0 };
   },
@@ -161,10 +167,18 @@ export const dashboardService = {
   },
 
   /** { carrera, facultad, '2025': n, '2026': n } — todas las filas con todos los años (0 si no hay). */
-  async carreraAnio(): Promise<CarreraAnioRow[]> {
+  /**
+   * Por carrera y año de participación.
+   *  - 'estudiantes':     personas distintas (default, comportamiento original).
+   *  - 'participaciones': inscripciones; un estudiante en 3 proyectos cuenta 3.
+   * Cada estudiante tiene una sola carrera: la suma de una columna (año) es el
+   * total general exacto de ese año en ambos modos.
+   */
+  async carreraAnio(metrica: CarreraAnioMetrica = 'estudiantes'): Promise<CarreraAnioRow[]> {
+    const conteo = metrica === 'participaciones' ? 'count(*)' : 'count(DISTINCT pe.student_id)';
     const rows = await selectAll<{ carrera: string; facultad: string; anio: number; total: number }>(
       `SELECT c.nombre AS carrera, f.nombre AS facultad, ${YEAR_OF('pe.asignada_en')} AS anio,
-              count(DISTINCT pe.student_id)::int AS total
+              ${conteo}::int AS total
        FROM project_enrollments pe
        JOIN students s  ON s.id = pe.student_id
        JOIN careers c   ON c.id = s.career_id

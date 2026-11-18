@@ -7,6 +7,14 @@ const tablaQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 
+const generoQuerySchema = z.object({
+  facultyId: z.string().uuid('facultyId debe ser un UUID').optional(),
+});
+
+const carreraAnioQuerySchema = z.object({
+  metrica: z.enum(['estudiantes', 'participaciones']).default('estudiantes'),
+});
+
 export const dashboardController = {
   async summary(_req: Request, res: Response): Promise<void> {
     res.json(await dashboardService.summary());
@@ -14,11 +22,13 @@ export const dashboardController = {
   async mapMarkers(_req: Request, res: Response): Promise<void> {
     res.json(await dashboardService.mapMarkers());
   },
-  async carreraAnio(_req: Request, res: Response): Promise<void> {
-    res.json(await dashboardService.carreraAnio());
+  async carreraAnio(req: Request, res: Response): Promise<void> {
+    const { metrica } = carreraAnioQuerySchema.parse(req.query);
+    res.json(await dashboardService.carreraAnio(metrica));
   },
-  async genero(_req: Request, res: Response): Promise<void> {
-    res.json(await dashboardService.genero());
+  async genero(req: Request, res: Response): Promise<void> {
+    const { facultyId } = generoQuerySchema.parse(req.query);
+    res.json(await dashboardService.genero(facultyId));
   },
   async tendenciaAnual(_req: Request, res: Response): Promise<void> {
     res.json(await dashboardService.tendenciaAnual());

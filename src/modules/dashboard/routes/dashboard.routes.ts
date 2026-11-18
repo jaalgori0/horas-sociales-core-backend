@@ -3,8 +3,8 @@
  *
  *   GET /summary                 KPIs, proyectos por estado, tendencia y género
  *   GET /map-markers             Marcadores del mapa (tabla map_markers)
- *   GET /carrera-anio            Estudiantes por carrera y año
- *   GET /genero                  Participantes por género (+ sinDato)
+ *   GET /carrera-anio            Por carrera y año (?metrica=estudiantes|participaciones)
+ *   GET /genero                  Participantes por género (+ sinDato) (?facultyId)
  *   GET /tendencia-anual         Estudiantes, proyectos y horas por año
  *   GET /estudiantes-municipio   Estudiantes por municipio de ejecución
  *   GET /proyectos-municipio     Proyectos (y activos) por municipio

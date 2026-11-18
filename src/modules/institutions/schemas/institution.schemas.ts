@@ -7,6 +7,27 @@
 import { z } from 'zod';
 import { imageSchema, optionalText, requiredText, uuidParam } from '../../shared/schemas.js';
 
+/** Mismo formato que el CHECK de 008 (y que students.telefono). '' → null. */
+const telefono = z
+  .string()
+  .trim()
+  .transform((value) => (value === '' ? null : value))
+  .pipe(
+    z
+      .string()
+      .regex(/^[0-9+\-\s]{8,20}$/, 'Teléfono inválido: use de 8 a 20 dígitos, espacios, + o -')
+      .nullable(),
+  )
+  .nullish();
+
+const contactoEmail = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .transform((value) => (value === '' ? null : value))
+  .pipe(z.string().max(254).email('Correo de contacto inválido').nullable())
+  .nullish();
+
 const institutionFields = {
   nombre: requiredText(200),
   sigla: optionalText(60),
@@ -14,6 +35,9 @@ const institutionFields = {
   ubicacion: optionalText(200),
   direccion: optionalText(300),
   descripcion: optionalText(4000),
+  contactoNombre: optionalText(200),
+  contactoEmail,
+  telefono,
   image_url: imageSchema,
   /** Alias aceptado por comodidad. */
   image: imageSchema,

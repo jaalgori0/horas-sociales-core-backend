@@ -5,7 +5,19 @@
  * backend ignora (p. ej. `image` duplicado de `projectImage`).
  */
 import { z } from 'zod';
+import { PROJECT_CLASIFICACIONES } from '../../shared/labels.js';
 import { imageSchema, isoDate, optionalText, requiredText, uuidParam } from '../../shared/schemas.js';
+
+const clasificacion = z.enum(PROJECT_CLASIFICACIONES, {
+  errorMap: () => ({ message: `Clasificación no válida (admitidas: ${PROJECT_CLASIFICACIONES.join(', ')})` }),
+});
+
+/** Al menos una; sin duplicados. Si se omite al crear, el proyecto queda como SS_EXTERNO. */
+const clasificaciones = z
+  .array(clasificacion)
+  .min(1, 'Seleccione al menos una clasificación')
+  .max(PROJECT_CLASIFICACIONES.length)
+  .transform((values) => [...new Set(values)]);
 
 const generoInput = z
   .enum(['Masculino', 'Femenino', 'HOMBRE', 'MUJER', ''])
@@ -61,6 +73,7 @@ const projectFields = {
   carreras: z.array(z.string().trim().min(1)).max(50).optional(),
   careerIds: z.array(z.string().uuid()).max(50).optional(),
   titulo: requiredText(300),
+  clasificaciones: clasificaciones.optional(),
   ubicacion: optionalText(300),
   descripcion: z.string().trim().max(10_000).optional(),
   resumen: optionalText(1000),
@@ -98,6 +111,15 @@ export const listProjectsQuerySchema = z.object({
   status: ignoreAll('Todos'),
   location: ignoreAll('Todas'),
   faculty: ignoreAll('Todas las facultades'),
+  /** Una o varias (?clasificacion=SS_INTERNO,PROFESIONALIZANTE): proyectos que tengan ALGUNA de ellas. */
+  clasificacion: z
+    .string()
+    .trim()
+    .max(200)
+    .transform((value) => value.split(',').map((v) => v.trim()).filter(Boolean))
+    .pipe(z.array(clasificacion))
+    .transform((values) => (values.length > 0 ? values : undefined))
+    .optional(),
   institutionId: z.string().uuid('institutionId debe ser un UUID').optional(),
 });
 

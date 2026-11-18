@@ -6,7 +6,7 @@ import type { Transaction } from 'sequelize';
 import { AppError } from '../../../core/errors/app-error.js';
 import { execReturning, selectOne, withTransaction } from '../../../core/database/sql.js';
 import { institutionsService } from '../../institutions/index.js';
-import { projectStatusFromUI } from '../../shared/labels.js';
+import { naturalezaFromClasificaciones, projectStatusFromUI, type ProjectClasificacion } from '../../shared/labels.js';
 import type { CreateProjectInput, ListProjectsQuery, UpdateProjectInput } from '../schemas/project.schemas.js';
 import { resolveCareerIds, resolveFacultyId } from './catalog-resolver.js';
 import { enrollmentsService } from './enrollments.service.js';
@@ -126,6 +126,33 @@ async function replaceCareers(projectId: string, careerIds: string[], t: Transac
   }
 }
 
+/**
+ * Deja exactamente `clasificaciones` en el proyecto. Se aplica la diferencia (solo
+ * se borra lo quitado y se inserta lo nuevo) para que el trigger de 008, que deriva
+ * projects.naturaleza, no la haga pasar por un estado intermedio sin clasificaciones.
+ */
+async function replaceClassifications(
+  projectId: string,
+  clasificaciones: ProjectClasificacion[],
+  t: Transaction,
+): Promise<void> {
+  await execReturning(
+    `INSERT INTO project_classifications (project_id, clasificacion)
+     SELECT :projectId, unnest(CAST(:clasificaciones AS text[]))
+     ON CONFLICT DO NOTHING
+     RETURNING clasificacion`,
+    { projectId, clasificaciones: `{${clasificaciones.join(',')}}` },
+    t,
+  );
+  await execReturning(
+    `DELETE FROM project_classifications
+     WHERE project_id = :projectId AND NOT (clasificacion = ANY (CAST(:clasificaciones AS text[])))
+     RETURNING clasificacion`,
+    { projectId, clasificaciones: `{${clasificaciones.join(',')}}` },
+    t,
+  );
+}
+
 export const projectsService = {
   async list(query: ListProjectsQuery): Promise<ProjectListDTO[]> {
     return (await fetchProjectRows(query)).map(toListDTO);
@@ -162,6 +189,9 @@ export const projectsService = {
         ...projectColumns(input),
         institution_id: institutionId,
         faculty_id: facultyId,
+        // El trigger de 008 crea la clasificación inicial a partir de la naturaleza;
+        // replaceClassifications() completa el resto de las elegidas.
+        naturaleza: naturalezaFromClasificaciones(input.clasificaciones ?? ['SS_EXTERNO']),
       };
       const names = Object.keys(columns);
       const [row] = await execReturning<{ id: string }>(
@@ -172,6 +202,7 @@ export const projectsService = {
       const projectId = row!.id;
 
       if (careerIds) await replaceCareers(projectId, careerIds, t);
+      if (input.clasificaciones) await replaceClassifications(projectId, input.clasificaciones, t);
       for (const student of input.students ?? []) {
         await enrollmentsService.enrollInTransaction(projectId, student, t);
       }
@@ -183,12 +214,19 @@ export const projectsService = {
 
   async update(id: string, input: UpdateProjectInput): Promise<ProjectDetailDTO> {
     return withTransaction(async (t) => {
-      const current = await selectOne<{ institution_id: string; fecha_cierre: string | null }>(
-        "SELECT institution_id, to_char(fecha_cierre, 'YYYY-MM-DD') AS fecha_cierre FROM projects WHERE id = :id FOR UPDATE",
+      const current = await selectOne<{ institution_id: string; fecha_cierre: string | null; es_sistema: boolean }>(
+        `SELECT institution_id, to_char(fecha_cierre, 'YYYY-MM-DD') AS fecha_cierre, (atributos ? 'sistema') AS es_sistema
+         FROM projects WHERE id = :id FOR UPDATE`,
         { id },
         t,
       );
       if (!current) throw AppError.notFound('Proyecto no encontrado');
+      // Las horas manuales/convalidaciones se registran como INTERNAS: el proyecto de sistema conserva SS_INTERNO.
+      if (current.es_sistema && input.clasificaciones && !input.clasificaciones.includes('SS_INTERNO')) {
+        throw AppError.conflict(
+          'El proyecto interno de asignaciones manuales debe conservar la clasificación "Servicio social interno"',
+        );
+      }
 
       const columns = projectColumns(input);
       if (hasInstitutionFields(input)) {
@@ -222,6 +260,7 @@ export const projectsService = {
 
       const careerIds = await resolveCareerIds(input, t);
       if (careerIds) await replaceCareers(id, careerIds, t);
+      if (input.clasificaciones) await replaceClassifications(id, input.clasificaciones, t);
 
       return projectsService.getById(id, t);
     });

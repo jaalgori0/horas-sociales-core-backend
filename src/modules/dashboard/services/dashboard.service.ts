@@ -21,8 +21,30 @@ import {
   type ProjectStatusUI,
 } from '../../shared/labels.js';
 import { resolverUbicacion, type UbicacionResuelta } from '../../shared/geo-el-salvador.js';
+import { studentNameSql } from '../../students/index.js';
 
 const TZ = `'America/El_Salvador'`;
+
+/**
+ * Participaciones que cuentan para "estudiantes en varios proyectos": historial
+ * completo (ASIGNADA/EN_CURSO/FINALIZADA), sin el proyecto de sistema de
+ * asignaciones manuales. Alias: pe (project_enrollments), p (projects).
+ * Lo comparten el KPI de summary() y el detalle estudiantesMultiProyecto().
+ */
+const MULTI_PROJECT_WHERE = `pe.estado IN ${ENROLLMENT_COUNTED_SQL} AND NOT (p.atributos ? 'sistema')`;
+
+export interface EstudianteMultiProyectoRow {
+  studentId: string;
+  nombre: string;
+  carnet: string;
+  carrera: string;
+  /** Proyectos distintos en los que participa o participó. */
+  proyectos: number;
+  /** De ellos, con participación activa hoy (ASIGNADA/EN_CURSO). */
+  activos: number;
+  /** Títulos de los proyectos, del más reciente al más antiguo. */
+  titulos: string[];
+}
 const YEAR_OF = (column: string) => `EXTRACT(YEAR FROM ${column} AT TIME ZONE ${TZ})::int`;
 
 /** Ubicación de un proyecto: texto libre + nombres por llave foránea (district_id), si existe. */
@@ -86,6 +108,12 @@ export interface DashboardSummary {
   totalActiveEnrollments: number;
   totalMarkers: number;
   totalStudentsExternal: number;
+  /**
+   * Estudiantes con participación en 2 o más proyectos distintos, en todo el
+   * historial (ASIGNADA/EN_CURSO/FINALIZADA). No cuenta el proyecto de sistema de
+   * asignaciones manuales (convalidaciones), que no es una iniciativa real.
+   */
+  totalStudentsMultiProject: number;
   /** `total` como string: así lo tipa el frontend (DashboardSummaryResponse). */
   projectsByStatus: Array<{ estado: ProjectStatusUI; total: string }>;
   trendByYear: TrendYearRow[];
@@ -282,6 +310,28 @@ export const dashboardService = {
     }));
   },
 
+  /** Estudiantes con 2+ proyectos y cuántos tiene cada uno (más proyectos primero). */
+  async estudiantesMultiProyecto(): Promise<EstudianteMultiProyectoRow[]> {
+    return selectAll<EstudianteMultiProyectoRow>(
+      `SELECT s.id AS "studentId", ${studentNameSql('s')} AS nombre, s.carnet, c.nombre AS carrera,
+              count(DISTINCT pe.project_id)::int AS proyectos,
+              count(DISTINCT pe.project_id) FILTER (WHERE pe.estado IN ${ENROLLMENT_ACTIVE_SQL})::int AS activos,
+              ARRAY(SELECT p2.titulo FROM project_enrollments pe2 JOIN projects p2 ON p2.id = pe2.project_id
+                     WHERE pe2.student_id = s.id AND pe2.estado IN ${ENROLLMENT_COUNTED_SQL}
+                       AND NOT (p2.atributos ? 'sistema')
+                     GROUP BY p2.id, p2.titulo
+                     ORDER BY max(pe2.asignada_en) DESC, p2.titulo) AS titulos
+       FROM project_enrollments pe
+       JOIN projects p ON p.id = pe.project_id
+       JOIN students s ON s.id = pe.student_id
+       JOIN careers c ON c.id = s.career_id
+       WHERE ${MULTI_PROJECT_WHERE}
+       GROUP BY s.id, c.nombre
+       HAVING count(DISTINCT pe.project_id) > 1
+       ORDER BY proyectos DESC, nombre`,
+    );
+  },
+
   async summary(): Promise<DashboardSummary> {
     const [totals, byStatus, trendByYear, genderSummary, municipios] = await Promise.all([
       selectOne<Omit<DashboardSummary, 'projectsByStatus' | 'trendByYear' | 'genderSummary' | 'totalMunicipalities'>>(
@@ -292,8 +342,16 @@ export const dashboardService = {
                 (SELECT count(*) FROM map_markers)::int  AS "totalMarkers",
                 (SELECT count(DISTINCT pe.student_id) FROM project_enrollments pe
                    JOIN projects p ON p.id = pe.project_id
-                  WHERE pe.estado IN ${ENROLLMENT_ACTIVE_SQL} AND p.naturaleza = 'EXTERNA')::int
+                  WHERE pe.estado IN ${ENROLLMENT_ACTIVE_SQL}
+                    AND EXISTS (SELECT 1 FROM project_classifications pc
+                                 WHERE pc.project_id = p.id AND pc.clasificacion = 'SS_EXTERNO'))::int
                   AS "totalStudentsExternal",
+                (SELECT count(*) FROM (
+                    SELECT pe.student_id FROM project_enrollments pe
+                      JOIN projects p ON p.id = pe.project_id
+                     WHERE ${MULTI_PROJECT_WHERE}
+                     GROUP BY pe.student_id
+                    HAVING count(DISTINCT pe.project_id) > 1) multi)::int AS "totalStudentsMultiProject",
                 (SELECT count(*) FROM students)::int     AS "totalStudents",
                 (SELECT count(DISTINCT student_id) FROM project_enrollments
                   WHERE estado IN ${ENROLLMENT_COUNTED_SQL})::int AS "totalParticipants",

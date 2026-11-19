@@ -21,7 +21,7 @@ import {
   type ProjectStatusUI,
 } from '../../shared/labels.js';
 import { resolverUbicacion, type UbicacionResuelta } from '../../shared/geo-el-salvador.js';
-import { studentNameSql } from '../../students/index.js';
+import { HORAS_REQUISITO, studentNameSql } from '../../students/index.js';
 
 const TZ = `'America/El_Salvador'`;
 
@@ -103,6 +103,48 @@ export interface TablaInstitucionRow {
   facultades: number;
   horas: number;
 }
+
+export interface Completaron600Row {
+  studentId: string;
+  nombre: string;
+  carnet: string;
+  carrera: string;
+  facultad: string;
+  /** Horas registradas dentro del año consultado. */
+  horasAnio: number;
+  /** Historial acumulado hasta el 31 de diciembre del año consultado. */
+  horasAcumuladas: number;
+}
+
+export interface Completaron600Response {
+  /** Año consultado (null si aún no hay participaciones). */
+  anio: number | null;
+  /** Años con participantes, ascendente (para el selector del frontend). */
+  anios: number[];
+  requisito: number;
+  /** Personas distintas que realizaron horas sociales en el año. */
+  participantes: number;
+  /** De ellas, cuántas tenían >= requisito acumulado al cierre del año. */
+  completaron: number;
+  pendientes: number;
+  /** 0–100, con un decimal. */
+  porcentaje: number;
+  /** Quiénes completaron (más horas acumuladas primero). */
+  estudiantes: Completaron600Row[];
+}
+
+/**
+ * Participantes de un año: estudiantes con una participación que cuenta asignada
+ * ese año, o con horas registradas (fecha_horas) ese año. Columnas: student_id, anio.
+ */
+const PARTICIPANTES_POR_ANIO_SQL = `
+  SELECT pe.student_id, ${YEAR_OF('pe.asignada_en')} AS anio
+  FROM project_enrollments pe
+  WHERE pe.estado IN ${ENROLLMENT_COUNTED_SQL}
+  UNION
+  SELECT pe.student_id, EXTRACT(YEAR FROM hm.fecha_horas)::int AS anio
+  FROM hour_movements hm
+  JOIN project_enrollments pe ON pe.id = hm.enrollment_id`;
 
 export interface DashboardSummary {
   totalInstitutions: number;
@@ -344,6 +386,76 @@ export const dashboardService = {
        HAVING count(DISTINCT pe.project_id) > 1
        ORDER BY proyectos DESC, nombre`,
     );
+  },
+
+  /**
+   * De quienes realizaron horas sociales en `anio` (ver PARTICIPANTES_POR_ANIO_SQL),
+   * cuántos y quiénes completaron el requisito de 600 h. Se evalúa el historial
+   * completo del estudiante hasta el cierre de ese año (todas sus participaciones,
+   * incluidas convalidaciones manuales), igual que el progreso del perfil, pero sin
+   * contar horas posteriores: un año pasado no cambia al registrar horas nuevas.
+   * Sin `anio`, se usa el más reciente con participantes. `facultyId` filtra por
+   * la facultad de la carrera del estudiante.
+   */
+  async completaron600(anio?: number, facultyId?: string): Promise<Completaron600Response> {
+    const params = { facultyId: facultyId ?? null };
+    const FACULTAD_WHERE = `(CAST(:facultyId AS uuid) IS NULL OR c.faculty_id = CAST(:facultyId AS uuid))`;
+    const anios = (
+      await selectAll<{ anio: number }>(
+        `SELECT DISTINCT x.anio
+         FROM (${PARTICIPANTES_POR_ANIO_SQL}) x
+         JOIN students s ON s.id = x.student_id
+         JOIN careers c  ON c.id = s.career_id
+         WHERE x.anio IS NOT NULL AND ${FACULTAD_WHERE}
+         ORDER BY 1`,
+        params,
+      )
+    ).map((r) => r.anio);
+    const anioConsulta = anio ?? anios[anios.length - 1] ?? null;
+    const vacio: Completaron600Response = {
+      anio: anioConsulta, anios, requisito: HORAS_REQUISITO,
+      participantes: 0, completaron: 0, pendientes: 0, porcentaje: 0, estudiantes: [],
+    };
+    if (anioConsulta === null) return vacio;
+
+    const rows = await selectAll<Completaron600Row & { completado: boolean }>(
+      `WITH participantes AS (
+         SELECT DISTINCT x.student_id FROM (${PARTICIPANTES_POR_ANIO_SQL}) x WHERE x.anio = :anio
+       ), horas AS (
+         SELECT pe.student_id,
+                COALESCE(sum(hm.horas) FILTER (WHERE EXTRACT(YEAR FROM hm.fecha_horas) = :anio), 0)::int AS horas_anio,
+                COALESCE(sum(hm.horas), 0)::int AS horas_acumuladas
+         FROM hour_movements hm
+         JOIN project_enrollments pe ON pe.id = hm.enrollment_id
+         JOIN participantes pt ON pt.student_id = pe.student_id
+         WHERE hm.fecha_horas <= make_date(:anio, 12, 31)
+         GROUP BY pe.student_id
+       )
+       SELECT s.id AS "studentId", ${studentNameSql('s')} AS nombre, s.carnet,
+              c.nombre AS carrera, f.nombre AS facultad,
+              COALESCE(h.horas_anio, 0) AS "horasAnio",
+              COALESCE(h.horas_acumuladas, 0) AS "horasAcumuladas",
+              COALESCE(h.horas_acumuladas, 0) >= :requisito AS completado
+       FROM participantes pt
+       JOIN students s  ON s.id = pt.student_id
+       JOIN careers c   ON c.id = s.career_id
+       JOIN faculties f ON f.id = c.faculty_id
+       LEFT JOIN horas h ON h.student_id = s.id
+       WHERE ${FACULTAD_WHERE}
+       ORDER BY "horasAcumuladas" DESC, nombre`,
+      { ...params, anio: anioConsulta, requisito: HORAS_REQUISITO },
+    );
+    const estudiantes = rows.filter((r) => r.completado).map(({ completado: _c, ...r }) => r);
+    const participantes = rows.length;
+    const completaron = estudiantes.length;
+    return {
+      ...vacio,
+      participantes,
+      completaron,
+      pendientes: participantes - completaron,
+      porcentaje: participantes ? Math.round((completaron * 1000) / participantes) / 10 : 0,
+      estudiantes,
+    };
   },
 
   async summary(): Promise<DashboardSummary> {

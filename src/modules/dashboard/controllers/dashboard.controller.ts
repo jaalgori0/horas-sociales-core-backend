@@ -11,6 +11,11 @@ const generoQuerySchema = z.object({
   facultyId: z.string().uuid('facultyId debe ser un UUID').optional(),
 });
 
+const completaron600QuerySchema = z.object({
+  anio: z.coerce.number().int().min(1900, 'anio inválido').max(2100, 'anio inválido').optional(),
+  facultyId: z.string().uuid('facultyId debe ser un UUID').optional(),
+});
+
 const carreraAnioQuerySchema = z.object({
   metrica: z.enum(['estudiantes', 'participaciones']).default('estudiantes'),
 });
@@ -45,6 +50,10 @@ export const dashboardController = {
   },
   async estudiantesMultiProyecto(_req: Request, res: Response): Promise<void> {
     res.json(await dashboardService.estudiantesMultiProyecto());
+  },
+  async completaron600(req: Request, res: Response): Promise<void> {
+    const { anio, facultyId } = completaron600QuerySchema.parse(req.query);
+    res.json(await dashboardService.completaron600(anio, facultyId));
   },
   async generoPorDepartamento(_req: Request, res: Response): Promise<void> {
     res.json(await dashboardService.generoPorDepartamento());

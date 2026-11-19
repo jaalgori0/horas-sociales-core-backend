@@ -139,7 +139,7 @@ Todo lo que inserta el ETL queda en `auditoria` con `actor = 'etl:css-historico'
 |---|---|
 | Nombre del estudiante | Se guarda **literal**, como viene en el reporte (`APELLIDO1, APELLIDO2 NOMBRES`), en `students.nombre_completo`. `nombres`/`apellidos` quedan en `NULL` hasta que se completen en la app, siempre los dos juntos (migración 002). |
 | Correo institucional | Se deriva como `<carnet>@uca.edu.sv`. |
-| Carrera y facultad | La carrera del PDF, sin sufijo de modalidad, se traduce con `staging.map_carreras` a una carrera del catálogo oficial (003). La facultad sale de `careers.faculty_id`. Licenciatura en Diseño pertenece a Ciencias Sociales y Humanidades. |
+| Carrera y facultad | La carrera del PDF, sin sufijo de modalidad, se traduce con `staging.map_carreras` a una carrera del catálogo oficial (003). La facultad sale de `careers.faculty_id`. Licenciatura en Diseño pertenece a Ingeniería y Arquitectura (migración 009). |
 | Sufijos de modalidad | `(presencial)`, `(semipresencial)` y `(virtual)` se eliminan de los reportes. `ck_careers_nombre_sin_modalidad` los prohíbe en el catálogo. |
 | Identidad del proyecto | `(institution_id, correlativo_css)`. El correlativo solo **no** es único. |
 | PDF frente a Excel | El PDF es la fuente oficial (nombres, participaciones, horas). El Excel completa las fechas y el área de los proyectos, y aporta los proyectos sin estudiantes. |

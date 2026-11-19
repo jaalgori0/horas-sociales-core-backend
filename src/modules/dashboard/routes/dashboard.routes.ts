@@ -11,6 +11,7 @@
  *   GET /metricas-institucion    Métricas por institución (?limit)
  *   GET /tabla-institucion       Tabla detallada por institución (?limit)
  *   GET /estudiantes-multiproyecto  Estudiantes con 2+ proyectos y cuántos tiene cada uno
+ *   GET /completaron-600         Participantes del año que completaron 600 h (?anio, ?facultyId)
  *
  * Además, `GET /students/genero-municipio` (género por departamento, para el
  * mapa) se monta en core/server/routes.ts antes del router de students.
@@ -30,3 +31,4 @@ dashboardRouter.get('/proyectos-municipio', dashboardController.proyectosMunicip
 dashboardRouter.get('/metricas-institucion', dashboardController.tablaInstitucion);
 dashboardRouter.get('/tabla-institucion', dashboardController.tablaInstitucion);
 dashboardRouter.get('/estudiantes-multiproyecto', dashboardController.estudiantesMultiProyecto);
+dashboardRouter.get('/completaron-600', dashboardController.completaron600);

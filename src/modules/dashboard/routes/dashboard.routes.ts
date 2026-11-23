@@ -1,7 +1,8 @@
 /**
  * Rutas del dashboard. Montadas en `${API_PREFIX}/dashboard` (solo lectura).
  *
- *   GET /summary                 KPIs, proyectos por estado, tendencia y género (?anio: tarjeta de externos)
+ *   GET /summary                 KPIs, proyectos por estado, tendencia y género
+ *                                (?anio: tarjeta de externos y, si se envía, proyectos que iniciaron ese año)
  *   GET /conciliacion            Excel CSS (alumnos por proyecto) vs. inscripciones cargadas (?anio)
  *   GET /map-markers             Marcadores del mapa (tabla map_markers)
  *   GET /carrera-anio            Por carrera y año (?metrica=estudiantes|participaciones)

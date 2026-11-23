@@ -36,6 +36,17 @@ const TZ = `'America/El_Salvador'`;
  */
 const MULTI_PROJECT_WHERE = `pe.estado IN ${ENROLLMENT_COUNTED_SQL} AND NOT (p.atributos ? 'sistema')`;
 
+/**
+ * Proyectos que cuentan en la tarjeta «Proyectos totales» y en «proyectos por estado»:
+ * servicio social externo real (clasificación SS_EXTERNO), sin el proyecto de sistema de
+ * asignaciones manuales. Con `:anioProyectos` (no nulo), solo los que iniciaron ese año
+ * (fecha_inicio). Alias: p (projects).
+ */
+const PROYECTOS_TARJETA_WHERE = `NOT (p.atributos ? 'sistema')
+  AND EXISTS (SELECT 1 FROM project_classifications pc
+               WHERE pc.project_id = p.id AND pc.clasificacion = 'SS_EXTERNO')
+  AND (CAST(:anioProyectos AS int) IS NULL OR EXTRACT(YEAR FROM p.fecha_inicio) = CAST(:anioProyectos AS int))`;
+
 export interface EstudianteMultiProyectoRow {
   studentId: string;
   nombre: string;
@@ -151,7 +162,17 @@ const PARTICIPANTES_POR_ANIO_SQL = `
 
 export interface DashboardSummary {
   totalInstitutions: number;
+  /**
+   * Proyectos de servicio social externo (SS_EXTERNO), sin el proyecto de sistema de
+   * asignaciones manuales. Total acumulado; con `?anio`, solo los que iniciaron ese año.
+   */
   totalProjects: number;
+  /** De `totalProjects`, los que vienen en el Excel CSS «Memoria de Labores» (projects.en_reporte_css). */
+  totalProjectsReporteCss: number;
+  /** De `totalProjects`, los que no vienen en el Excel (solo en los PDF de horas o creados en la app). */
+  totalProjectsSinReporteCss: number;
+  /** Año aplicado a los totales de proyectos (`?anio`); null = total acumulado. */
+  anioProyectos: number | null;
   totalActiveEnrollments: number;
   totalMarkers: number;
   /**
@@ -580,10 +601,14 @@ export const dashboardService = {
 
   async summary(anio?: number): Promise<DashboardSummary> {
     const anioExternos = anio ?? (await ultimoAnioConParticipaciones());
+    // Los proyectos solo se filtran con un año pedido explícitamente; sin él, total acumulado.
+    const anioProyectos = anio ?? null;
     const [totals, byStatus, trendByYear, genderSummary, municipios] = await Promise.all([
-      selectOne<Omit<DashboardSummary, 'projectsByStatus' | 'trendByYear' | 'genderSummary' | 'totalMunicipalities' | 'anioExternos'>>(
+      selectOne<Omit<DashboardSummary, 'projectsByStatus' | 'trendByYear' | 'genderSummary' | 'totalMunicipalities' | 'anioExternos' | 'anioProyectos'>>(
         `SELECT (SELECT count(*) FROM institutions)::int AS "totalInstitutions",
-                (SELECT count(*) FROM projects)::int     AS "totalProjects",
+                proy.total AS "totalProjects",
+                proy.reporte_css AS "totalProjectsReporteCss",
+                proy.total - proy.reporte_css AS "totalProjectsSinReporteCss",
                 (SELECT count(*) FROM project_enrollments WHERE estado IN ${ENROLLMENT_ACTIVE_SQL})::int
                   AS "totalActiveEnrollments",
                 (SELECT count(*) FROM map_markers)::int  AS "totalMarkers",
@@ -609,13 +634,21 @@ export const dashboardService = {
                 WHERE pe.estado IN ${ENROLLMENT_PARTICIPATION_SQL}
                   AND ${YEAR_OF('pe.asignada_en')} = CAST(:anio AS int)
                   AND EXISTS (SELECT 1 FROM project_classifications pc
-                               WHERE pc.project_id = pe.project_id AND pc.clasificacion = 'SS_EXTERNO')) ext`,
-        { anio: anioExternos },
+                               WHERE pc.project_id = pe.project_id AND pc.clasificacion = 'SS_EXTERNO')) ext
+         CROSS JOIN (SELECT count(*)::int AS total,
+                            count(*) FILTER (WHERE p.en_reporte_css)::int AS reporte_css
+                       FROM projects p
+                      WHERE ${PROYECTOS_TARJETA_WHERE}) proy`,
+        { anio: anioExternos, anioProyectos },
       ),
+      // Mismo criterio que la tarjeta: la suma por estado coincide con totalProjects.
       selectAll<{ estado: ProjectStatusUI; total: number }>(
         `SELECT ${projectStatusSql('p')} AS estado, count(*)::int AS total
-         FROM projects p GROUP BY 1
+         FROM projects p
+         WHERE ${PROYECTOS_TARJETA_WHERE}
+         GROUP BY 1
          ORDER BY array_position(ARRAY['Activo', 'En progreso', 'Cerrado'], ${projectStatusSql('p')})`,
+        { anioProyectos },
       ),
       dashboardService.tendenciaAnual(),
       dashboardService.genero(),
@@ -624,6 +657,7 @@ export const dashboardService = {
     return {
       ...totals!,
       anioExternos,
+      anioProyectos,
       projectsByStatus: byStatus.map((r) => ({ estado: r.estado, total: String(r.total) })),
       trendByYear,
       genderSummary,

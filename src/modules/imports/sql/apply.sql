@@ -95,6 +95,22 @@ WITH ins AS (
 )
 SELECT count(*)::int AS n FROM ins;
 
+-- @step proyectos_en_reporte_css
+-- Marca (migración 015) los proyectos del lote que vienen en el Excel CSS, nuevos o ya
+-- existentes, aunque no haya nada más que completar. Solo de false a true.
+WITH upd AS (
+    UPDATE projects p
+    SET en_reporte_css = true
+    FROM t_proj_c t
+    JOIN institutions i ON fn_import_numero(i.codigo_css) = t.codigo_css
+    WHERE cardinality(t.xls_ids) > 0
+      AND p.institution_id = i.id
+      AND fn_import_numero(p.correlativo_css) = t.correlativo
+      AND NOT p.en_reporte_css
+    RETURNING 1
+)
+SELECT count(*)::int AS n FROM upd;
+
 -- @step estudiantes_insertados
 WITH ins AS (
     INSERT INTO students (carnet, nombres, apellidos, nombre_completo, correo_institucional, career_id)

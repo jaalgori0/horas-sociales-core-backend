@@ -11,6 +11,9 @@
  *  - Año de participación = asignada_en; año de proyecto = fecha_inicio;
  *    año de horas = fecha_horas. Hora local de El Salvador.
  *  - Carrera/facultad por llaves foráneas, nunca por texto.
+ *  - Filtro general de año (criterio de la Memoria de Labores del CSS): `anio` número =
+ *    proyectos INICIADOS, inscripciones ASIGNADAS y horas REGISTRADAS ese año;
+ *    `null` = todos los años (acumulado). La tendencia anual nunca se filtra.
  */
 import { selectAll, selectOne } from '../../../core/database/sql.js';
 import {
@@ -36,17 +39,6 @@ const TZ = `'America/El_Salvador'`;
  */
 const MULTI_PROJECT_WHERE = `pe.estado IN ${ENROLLMENT_COUNTED_SQL} AND NOT (p.atributos ? 'sistema')`;
 
-/**
- * Proyectos que cuentan en la tarjeta «Proyectos totales» y en «proyectos por estado»:
- * servicio social externo real (clasificación SS_EXTERNO), sin el proyecto de sistema de
- * asignaciones manuales. Con `:anioProyectos` (no nulo), solo los que iniciaron ese año
- * (fecha_inicio). Alias: p (projects).
- */
-const PROYECTOS_TARJETA_WHERE = `NOT (p.atributos ? 'sistema')
-  AND EXISTS (SELECT 1 FROM project_classifications pc
-               WHERE pc.project_id = p.id AND pc.clasificacion = 'SS_EXTERNO')
-  AND (CAST(:anioProyectos AS int) IS NULL OR EXTRACT(YEAR FROM p.fecha_inicio) = CAST(:anioProyectos AS int))`;
-
 export interface EstudianteMultiProyectoRow {
   studentId: string;
   nombre: string;
@@ -61,6 +53,27 @@ export interface EstudianteMultiProyectoRow {
 }
 const YEAR_OF = (column: string) => `EXTRACT(YEAR FROM ${column} AT TIME ZONE ${TZ})::int`;
 
+/** Año del filtro general del dashboard: un año, o `null` = todos los años. */
+export type AnioFiltro = number | null;
+
+/** Condición "en el año `:anio`" (siempre verdadera con `:anio` nulo). */
+const enAnio = (anioExpr: string) => `(CAST(:anio AS int) IS NULL OR ${anioExpr} = CAST(:anio AS int))`;
+/** Inscripción asignada en el año. Alias por defecto: pe (project_enrollments). */
+const INSC_EN_ANIO = (alias = 'pe') => enAnio(YEAR_OF(`${alias}.asignada_en`));
+/** Proyecto iniciado en el año. Alias por defecto: p (projects). */
+const PROY_EN_ANIO = (alias = 'p') => enAnio(`EXTRACT(YEAR FROM ${alias}.fecha_inicio)::int`);
+/** Horas registradas en el año. Alias por defecto: hm (hour_movements). */
+const HORAS_EN_ANIO = (alias = 'hm') => enAnio(`EXTRACT(YEAR FROM ${alias}.fecha_horas)::int`);
+
+/**
+ * Proyectos reales del dashboard (tarjetas, estados, municipios, tabla por institución):
+ * servicio social externo (clasificación SS_EXTERNO), sin el proyecto de sistema de
+ * asignaciones manuales. No incluye el filtro de año (ver PROY_EN_ANIO). Alias: p.
+ */
+const PROYECTO_REAL_WHERE = `NOT (p.atributos ? 'sistema')
+  AND EXISTS (SELECT 1 FROM project_classifications pc
+               WHERE pc.project_id = p.id AND pc.clasificacion = 'SS_EXTERNO')`;
+
 /** Ubicación de un proyecto: texto libre + nombres por llave foránea (district_id), si existe. */
 interface FilaGeo {
   ubicacion: string | null;
@@ -73,14 +86,17 @@ function resolverFila(fila: FilaGeo): UbicacionResuelta {
 }
 
 /** Participaciones que cuentan (ASIGNADA/EN_CURSO/FINALIZADA) con la ubicación de su proyecto. */
-function participacionesConUbicacion(): Promise<Array<FilaGeo & { student_id: string; genero: string | null }>> {
+function participacionesConUbicacion(
+  anio: AnioFiltro = null,
+): Promise<Array<FilaGeo & { student_id: string; genero: string | null }>> {
   return selectAll(
     `SELECT p.ubicacion, gm.nombre AS municipio_fk, gdep.nombre AS departamento_fk, pe.student_id, s.genero
      FROM project_enrollments pe
      JOIN students s ON s.id = pe.student_id
      JOIN projects p ON p.id = pe.project_id
      ${PROJECT_GEO_JOINS}
-     WHERE pe.estado IN ${ENROLLMENT_COUNTED_SQL}`,
+     WHERE pe.estado IN ${ENROLLMENT_COUNTED_SQL} AND ${INSC_EN_ANIO()}`,
+    { anio },
   );
 }
 
@@ -164,14 +180,16 @@ export interface DashboardSummary {
   totalInstitutions: number;
   /**
    * Proyectos de servicio social externo (SS_EXTERNO), sin el proyecto de sistema de
-   * asignaciones manuales. Total acumulado; con `?anio`, solo los que iniciaron ese año.
+   * asignaciones manuales, iniciados en `anio` (todos con `anio` nulo).
    */
   totalProjects: number;
   /** De `totalProjects`, los que vienen en el Excel CSS «Memoria de Labores» (projects.en_reporte_css). */
   totalProjectsReporteCss: number;
   /** De `totalProjects`, los que no vienen en el Excel (solo en los PDF de horas o creados en la app). */
   totalProjectsSinReporteCss: number;
-  /** Año aplicado a los totales de proyectos (`?anio`); null = total acumulado. */
+  /** Año del filtro general aplicado a todos los totales; null = todos los años. */
+  anio: number | null;
+  /** Igual a `anio` (compatibilidad). */
   anioProyectos: number | null;
   totalActiveEnrollments: number;
   totalMarkers: number;
@@ -183,11 +201,11 @@ export interface DashboardSummary {
   totalStudentsExternal: number;
   /** Participaciones del año sin deduplicar (un estudiante en 3 proyectos cuenta 3), incluidas las abandonadas. */
   totalEnrollmentsExternal: number;
-  /** Año de la tarjeta: el pedido o, sin él, el más reciente con participaciones. */
+  /** Igual a `anio` (compatibilidad con la tarjeta de externos). */
   anioExternos: number | null;
   /**
-   * Estudiantes con participación en 2 o más proyectos distintos, en todo el
-   * historial (ASIGNADA/EN_CURSO/FINALIZADA). No cuenta el proyecto de sistema de
+   * Estudiantes con participación en 2 o más proyectos distintos
+   * (ASIGNADA/EN_CURSO/FINALIZADA), contando solo las asignadas en `anio` (todas con null). No cuenta el proyecto de sistema de
    * asignaciones manuales (convalidaciones), que no es una iniciativa real.
    */
   totalStudentsMultiProject: number;
@@ -245,8 +263,11 @@ async function ultimoAnioConParticipaciones(): Promise<number | null> {
 }
 
 export const dashboardService = {
-  /** Participantes por género. Con `facultyId`, solo los de esa facultad (por la carrera del estudiante). */
-  async genero(facultyId?: string): Promise<GenderSummary> {
+  /**
+   * Participantes por género. Con `facultyId`, solo los de esa facultad (por la carrera del
+   * estudiante). Con `anio`, solo quienes tienen una participación asignada ese año.
+   */
+  async genero(facultyId?: string, anio: AnioFiltro = null): Promise<GenderSummary> {
     const row = await selectOne<GenderSummary>(
       `SELECT count(*) FILTER (WHERE s.genero = 'HOMBRE')::int AS hombres,
               count(*) FILTER (WHERE s.genero = 'MUJER')::int  AS mujeres,
@@ -254,9 +275,10 @@ export const dashboardService = {
        FROM students s
        JOIN careers c ON c.id = s.career_id
        WHERE EXISTS (SELECT 1 FROM project_enrollments pe
-                      WHERE pe.student_id = s.id AND pe.estado IN ${ENROLLMENT_COUNTED_SQL})
+                      WHERE pe.student_id = s.id AND pe.estado IN ${ENROLLMENT_COUNTED_SQL}
+                        AND ${INSC_EN_ANIO()})
          AND (CAST(:facultyId AS uuid) IS NULL OR c.faculty_id = CAST(:facultyId AS uuid))`,
-      { facultyId: facultyId ?? null },
+      { facultyId: facultyId ?? null, anio },
     );
     return row ?? { hombres: 0, mujeres: 0, sinDato: 0 };
   },
@@ -290,6 +312,8 @@ export const dashboardService = {
    *                       abandonadas (RETIRADA) también cuentan.
    * Cada estudiante tiene una sola carrera: la suma de una columna (año) es el
    * total general exacto de ese año en ambos modos.
+   * `todos`: el mismo conteo sin separar por año (en 'estudiantes', personas distintas
+   * en todo el historial: no es la suma de los años si alguien participó en varios).
    */
   async carreraAnio(metrica: CarreraAnioMetrica = 'estudiantes'): Promise<CarreraAnioRow[]> {
     const conteo = metrica === 'participaciones' ? 'count(*)' : 'count(DISTINCT pe.student_id)';
@@ -302,19 +326,20 @@ export const dashboardService = {
        JOIN careers c   ON c.id = s.career_id
        JOIN faculties f ON f.id = c.faculty_id
        WHERE pe.estado IN ${estados}
-       GROUP BY 1, 2, 3
+       GROUP BY GROUPING SETS ((1, 2, 3), (1, 2))
        ORDER BY 1, 3`,
     );
-    const years = [...new Set(rows.map((r) => String(r.anio)))].sort();
+    // Fila con anio NULL = subtotal de la carrera en todos los años (GROUPING SETS).
+    const years = [...new Set(rows.filter((r) => r.anio !== null).map((r) => String(r.anio)))].sort();
     const byCareer = new Map<string, CarreraAnioRow>();
     for (const r of rows) {
       let row = byCareer.get(r.carrera);
       if (!row) {
-        row = { carrera: r.carrera, facultad: r.facultad } as CarreraAnioRow;
+        row = { carrera: r.carrera, facultad: r.facultad, todos: 0 } as CarreraAnioRow;
         for (const y of years) row[y] = 0;
         byCareer.set(r.carrera, row);
       }
-      row[String(r.anio)] = r.total;
+      row[r.anio === null ? 'todos' : String(r.anio)] = r.total;
     }
     return [...byCareer.values()];
   },
@@ -325,9 +350,9 @@ export const dashboardService = {
   // DISTINTOS por grupo. Así un municipio ("Soyapango") siempre cae bajo su
   // departamento ("San Salvador"), con o sin tildes y con o sin el departamento escrito.
 
-  async estudiantesPorMunicipio(): Promise<Array<{ municipio: string; estudiantes: number }>> {
+  async estudiantesPorMunicipio(anio: AnioFiltro = null): Promise<Array<{ municipio: string; estudiantes: number }>> {
     const grupos = new Map<string, Set<string>>();
-    for (const fila of await participacionesConUbicacion()) {
+    for (const fila of await participacionesConUbicacion(anio)) {
       const { municipio } = resolverFila(fila);
       grupos.set(municipio, (grupos.get(municipio) ?? new Set()).add(fila.student_id));
     }
@@ -336,13 +361,16 @@ export const dashboardService = {
       .sort((a, b) => b.estudiantes - a.estudiantes || a.municipio.localeCompare(b.municipio, 'es'));
   },
 
-  async proyectosPorMunicipio(): Promise<
+  /** Proyectos reales (iniciados en `anio`, si se pide) por municipio; `activos` = estado actual. */
+  async proyectosPorMunicipio(anio: AnioFiltro = null): Promise<
     Array<{ municipio: string; departamento: string; proyectos: number; activos: number; municipioConocido: boolean }>
   > {
     const proyectos = await selectAll<FilaGeo & { estado: string }>(
       `SELECT p.ubicacion, gm.nombre AS municipio_fk, gdep.nombre AS departamento_fk, p.estado
        FROM projects p
-       ${PROJECT_GEO_JOINS}`,
+       ${PROJECT_GEO_JOINS}
+       WHERE ${PROYECTO_REAL_WHERE} AND ${PROY_EN_ANIO()}`,
+      { anio },
     );
     const grupos = new Map<string, { municipio: string; departamento: string; proyectos: number; activos: number; municipioConocido: boolean }>();
     for (const p of proyectos) {
@@ -390,7 +418,12 @@ export const dashboardService = {
     );
   },
 
-  async tablaInstitucion(limit?: number): Promise<TablaInstitucionRow[]> {
+  /**
+   * Por institución: proyectos reales (iniciados en `anio`; activos/cerrados = estado actual),
+   * estudiantes (participación asignada en `anio`) y horas (registradas en `anio`). Con un
+   * año, solo las instituciones con alguna actividad ese año.
+   */
+  async tablaInstitucion(limit?: number, anio: AnioFiltro = null): Promise<TablaInstitucionRow[]> {
     const rows = await selectAll<Omit<TablaInstitucionRow, 'tipo' | 'tipoDetalle'> & { tipo_codigo: string | null; sigla: string | null }>(
       `WITH proj AS (
          SELECT p.institution_id,
@@ -398,27 +431,29 @@ export const dashboardService = {
                 count(*) FILTER (WHERE ${projectStatusSql('p')} = 'Activo')::int      AS activos,
                 count(*) FILTER (WHERE ${projectStatusSql('p')} = 'En progreso')::int AS progreso,
                 count(*) FILTER (WHERE ${projectStatusSql('p')} = 'Cerrado')::int     AS cerrados
-         FROM projects p GROUP BY 1
+         FROM projects p WHERE ${PROYECTO_REAL_WHERE} AND ${PROY_EN_ANIO()} GROUP BY 1
        ), est AS (
          SELECT p.institution_id, count(DISTINCT pe.student_id)::int AS estudiantes
          FROM project_enrollments pe JOIN projects p ON p.id = pe.project_id
-         WHERE pe.estado IN ${ENROLLMENT_COUNTED_SQL} GROUP BY 1
+         WHERE pe.estado IN ${ENROLLMENT_COUNTED_SQL} AND ${INSC_EN_ANIO()} GROUP BY 1
        ), fac AS (
          SELECT x.institution_id, count(DISTINCT x.faculty_id)::int AS facultades
-         FROM (SELECT p.institution_id, p.faculty_id FROM projects p WHERE p.faculty_id IS NOT NULL
+         FROM (SELECT p.institution_id, p.faculty_id FROM projects p
+                WHERE p.faculty_id IS NOT NULL AND ${PROY_EN_ANIO()}
                UNION ALL
                SELECT p.institution_id, c.faculty_id FROM project_careers pc
                  JOIN projects p ON p.id = pc.project_id JOIN careers c ON c.id = pc.career_id
+                WHERE ${PROY_EN_ANIO()}
                UNION ALL
                SELECT p.institution_id, c.faculty_id FROM project_enrollments pe
                  JOIN projects p ON p.id = pe.project_id JOIN students s ON s.id = pe.student_id
                  JOIN careers c ON c.id = s.career_id
-               WHERE pe.estado IN ${ENROLLMENT_COUNTED_SQL}) x
+               WHERE pe.estado IN ${ENROLLMENT_COUNTED_SQL} AND ${INSC_EN_ANIO()}) x
          GROUP BY 1
        ), hrs AS (
          SELECT p.institution_id, sum(hm.horas)::int AS horas
          FROM hour_movements hm JOIN project_enrollments pe ON pe.id = hm.enrollment_id
-         JOIN projects p ON p.id = pe.project_id GROUP BY 1
+         JOIN projects p ON p.id = pe.project_id WHERE ${HORAS_EN_ANIO()} GROUP BY 1
        )
        SELECT i.id, i.nombre, i.sigla, i.tipo AS tipo_codigo, COALESCE(i.ubicacion, '') AS ubicacion,
               COALESCE(proj.total, 0) AS total, COALESCE(proj.activos, 0) AS activos,
@@ -430,9 +465,11 @@ export const dashboardService = {
        LEFT JOIN est  ON est.institution_id = i.id
        LEFT JOIN fac  ON fac.institution_id = i.id
        LEFT JOIN hrs  ON hrs.institution_id = i.id
+       WHERE CAST(:anio AS int) IS NULL
+          OR proj.total > 0 OR est.estudiantes > 0 OR hrs.horas > 0
        ORDER BY total DESC, estudiantes DESC, i.nombre_normalizado
        ${limit ? 'LIMIT :limit' : ''}`,
-      { limit: limit ?? null },
+      { limit: limit ?? null, anio },
     );
     return rows.map(({ tipo_codigo, sigla, ...r }) => ({
       ...r,
@@ -442,25 +479,29 @@ export const dashboardService = {
     }));
   },
 
-  /** Estudiantes con 2+ proyectos y cuántos tiene cada uno (más proyectos primero). */
-  async estudiantesMultiProyecto(): Promise<EstudianteMultiProyectoRow[]> {
+  /**
+   * Estudiantes con 2+ proyectos y cuántos tiene cada uno (más proyectos primero).
+   * Con `anio`, solo cuentan las participaciones asignadas ese año.
+   */
+  async estudiantesMultiProyecto(anio: AnioFiltro = null): Promise<EstudianteMultiProyectoRow[]> {
     return selectAll<EstudianteMultiProyectoRow>(
       `SELECT s.id AS "studentId", ${studentNameSql('s')} AS nombre, s.carnet, c.nombre AS carrera,
               count(DISTINCT pe.project_id)::int AS proyectos,
               count(DISTINCT pe.project_id) FILTER (WHERE pe.estado IN ${ENROLLMENT_ACTIVE_SQL})::int AS activos,
               ARRAY(SELECT p2.titulo FROM project_enrollments pe2 JOIN projects p2 ON p2.id = pe2.project_id
                      WHERE pe2.student_id = s.id AND pe2.estado IN ${ENROLLMENT_COUNTED_SQL}
-                       AND NOT (p2.atributos ? 'sistema')
+                       AND NOT (p2.atributos ? 'sistema') AND ${INSC_EN_ANIO('pe2')}
                      GROUP BY p2.id, p2.titulo
                      ORDER BY max(pe2.asignada_en) DESC, p2.titulo) AS titulos
        FROM project_enrollments pe
        JOIN projects p ON p.id = pe.project_id
        JOIN students s ON s.id = pe.student_id
        JOIN careers c ON c.id = s.career_id
-       WHERE ${MULTI_PROJECT_WHERE}
+       WHERE ${MULTI_PROJECT_WHERE} AND ${INSC_EN_ANIO()}
        GROUP BY s.id, c.nombre
        HAVING count(DISTINCT pe.project_id) > 1
        ORDER BY proyectos DESC, nombre`,
+      { anio },
     );
   },
 
@@ -599,17 +640,47 @@ export const dashboardService = {
     return { ...vacio, reporteCss, sistema, diferencia: reporteCss.alumnos - sistema.inscripciones, proyectos };
   },
 
-  async summary(anio?: number): Promise<DashboardSummary> {
-    const anioExternos = anio ?? (await ultimoAnioConParticipaciones());
-    // Los proyectos solo se filtran con un año pedido explícitamente; sin él, total acumulado.
-    const anioProyectos = anio ?? null;
+  /**
+   * Años con datos para el selector general (participaciones asignadas, proyectos
+   * reales iniciados u horas registradas) y el año por defecto: el más reciente con
+   * participaciones (si no hay, el más reciente de la lista).
+   */
+  async anios(): Promise<{ anios: number[]; anioPorDefecto: number | null }> {
+    const anios = (
+      await selectAll<{ anio: number }>(
+        `SELECT ${YEAR_OF('pe.asignada_en')} AS anio FROM project_enrollments pe
+          WHERE pe.estado IN ${ENROLLMENT_PARTICIPATION_SQL}
+         UNION SELECT EXTRACT(YEAR FROM p.fecha_inicio)::int FROM projects p
+          WHERE p.fecha_inicio IS NOT NULL AND ${PROYECTO_REAL_WHERE}
+         UNION SELECT EXTRACT(YEAR FROM hm.fecha_horas)::int FROM hour_movements hm
+         ORDER BY 1`,
+      )
+    ).map((r) => r.anio);
+    const anioPorDefecto = (await ultimoAnioConParticipaciones()) ?? anios[anios.length - 1] ?? null;
+    return { anios, anioPorDefecto };
+  },
+
+  /**
+   * KPIs del dashboard con el filtro general de año. `anio`: número = ese año;
+   * `null` = todos los años; `undefined` = año por defecto (el más reciente con
+   * participaciones). La tendencia anual no se filtra.
+   */
+  async summary(anioPedido?: AnioFiltro): Promise<DashboardSummary> {
+    const anio = anioPedido === undefined ? await ultimoAnioConParticipaciones() : anioPedido;
     const [totals, byStatus, trendByYear, genderSummary, municipios] = await Promise.all([
-      selectOne<Omit<DashboardSummary, 'projectsByStatus' | 'trendByYear' | 'genderSummary' | 'totalMunicipalities' | 'anioExternos' | 'anioProyectos'>>(
-        `SELECT (SELECT count(*) FROM institutions)::int AS "totalInstitutions",
+      selectOne<Omit<DashboardSummary, 'projectsByStatus' | 'trendByYear' | 'genderSummary' | 'totalMunicipalities' | 'anio' | 'anioExternos' | 'anioProyectos'>>(
+        // Instituciones: con un año, las que tienen proyectos iniciados ese año; en todos
+        // los años, todas las registradas (aliadas aunque aún no tengan proyectos).
+        `SELECT (CASE WHEN CAST(:anio AS int) IS NULL THEN (SELECT count(*) FROM institutions)
+                      ELSE (SELECT count(DISTINCT p.institution_id) FROM projects p
+                             WHERE ${PROYECTO_REAL_WHERE} AND ${PROY_EN_ANIO()})
+                 END)::int AS "totalInstitutions",
                 proy.total AS "totalProjects",
                 proy.reporte_css AS "totalProjectsReporteCss",
                 proy.total - proy.reporte_css AS "totalProjectsSinReporteCss",
-                (SELECT count(*) FROM project_enrollments WHERE estado IN ${ENROLLMENT_ACTIVE_SQL})::int
+                -- Activas = estado actual, de las participaciones asignadas en el año.
+                (SELECT count(*) FROM project_enrollments pe
+                  WHERE pe.estado IN ${ENROLLMENT_ACTIVE_SQL} AND ${INSC_EN_ANIO()})::int
                   AS "totalActiveEnrollments",
                 (SELECT count(*) FROM map_markers)::int  AS "totalMarkers",
                 ext.estudiantes AS "totalStudentsExternal",
@@ -617,13 +688,13 @@ export const dashboardService = {
                 (SELECT count(*) FROM (
                     SELECT pe.student_id FROM project_enrollments pe
                       JOIN projects p ON p.id = pe.project_id
-                     WHERE ${MULTI_PROJECT_WHERE}
+                     WHERE ${MULTI_PROJECT_WHERE} AND ${INSC_EN_ANIO()}
                      GROUP BY pe.student_id
                     HAVING count(DISTINCT pe.project_id) > 1) multi)::int AS "totalStudentsMultiProject",
                 (SELECT count(*) FROM students)::int     AS "totalStudents",
-                (SELECT count(DISTINCT student_id) FROM project_enrollments
-                  WHERE estado IN ${ENROLLMENT_COUNTED_SQL})::int AS "totalParticipants",
-                (SELECT COALESCE(sum(horas), 0) FROM hour_movements)::int AS "totalHours",
+                (SELECT count(DISTINCT pe.student_id) FROM project_enrollments pe
+                  WHERE pe.estado IN ${ENROLLMENT_COUNTED_SQL} AND ${INSC_EN_ANIO()})::int AS "totalParticipants",
+                (SELECT COALESCE(sum(hm.horas), 0) FROM hour_movements hm WHERE ${HORAS_EN_ANIO()})::int AS "totalHours",
                 (SELECT count(*) FROM faculties WHERE activo)::int AS "totalFaculties",
                 (SELECT count(*) FROM careers WHERE activo)::int   AS "totalCareers"
          -- Estudiantes: sin las RETIRADA (no cuenta quien solo abandonó). Inscripciones:
@@ -632,32 +703,33 @@ export const dashboardService = {
                       count(*)::int AS inscripciones
                  FROM project_enrollments pe
                 WHERE pe.estado IN ${ENROLLMENT_PARTICIPATION_SQL}
-                  AND ${YEAR_OF('pe.asignada_en')} = CAST(:anio AS int)
+                  AND ${INSC_EN_ANIO()}
                   AND EXISTS (SELECT 1 FROM project_classifications pc
                                WHERE pc.project_id = pe.project_id AND pc.clasificacion = 'SS_EXTERNO')) ext
          CROSS JOIN (SELECT count(*)::int AS total,
                             count(*) FILTER (WHERE p.en_reporte_css)::int AS reporte_css
                        FROM projects p
-                      WHERE ${PROYECTOS_TARJETA_WHERE}) proy`,
-        { anio: anioExternos, anioProyectos },
+                      WHERE ${PROYECTO_REAL_WHERE} AND ${PROY_EN_ANIO()}) proy`,
+        { anio },
       ),
-      // Mismo criterio que la tarjeta: la suma por estado coincide con totalProjects.
+      // Mismo criterio que la tarjeta: la suma por estado (estado ACTUAL) coincide con totalProjects.
       selectAll<{ estado: ProjectStatusUI; total: number }>(
         `SELECT ${projectStatusSql('p')} AS estado, count(*)::int AS total
          FROM projects p
-         WHERE ${PROYECTOS_TARJETA_WHERE}
+         WHERE ${PROYECTO_REAL_WHERE} AND ${PROY_EN_ANIO()}
          GROUP BY 1
          ORDER BY array_position(ARRAY['Activo', 'En progreso', 'Cerrado'], ${projectStatusSql('p')})`,
-        { anioProyectos },
+        { anio },
       ),
       dashboardService.tendenciaAnual(),
-      dashboardService.genero(),
-      dashboardService.proyectosPorMunicipio(),
+      dashboardService.genero(undefined, anio),
+      dashboardService.proyectosPorMunicipio(anio),
     ]);
     return {
       ...totals!,
-      anioExternos,
-      anioProyectos,
+      anio,
+      anioExternos: anio,
+      anioProyectos: anio,
       projectsByStatus: byStatus.map((r) => ({ estado: r.estado, total: String(r.total) })),
       trendByYear,
       genderSummary,

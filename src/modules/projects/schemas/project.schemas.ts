@@ -86,6 +86,12 @@ const projectFields = {
   projectImage: imageSchema,
   image: imageSchema,
   students: z.array(enrollStudentSchema).max(200).optional(),
+  /**
+   * Confirma que se crea/guarda aunque exista un proyecto (o institución) con un nombre
+   * equivalente (nombre_clave) en la misma institución. Sin él, 409 PROYECTO_SIMILAR /
+   * INSTITUCION_SIMILAR con la lista para elegir el existente.
+   */
+  confirmarSimilar: z.boolean().optional(),
 };
 
 export const createProjectSchema = z.object(projectFields);

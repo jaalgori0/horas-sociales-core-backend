@@ -4,7 +4,7 @@
 -- Lo ejecuta `pnpm etl:transform` dentro de UNA transacción (sin BEGIN/COMMIT aquí);
 -- con --dry-run la transacción se revierte al final.
 --
--- Requisitos: migración 002_legacy_css_import_support.sql aplicada y staging cargado
+-- Requisitos: migraciones 002 y 014 (fn_import_numero) aplicadas y staging cargado
 -- (`pnpm etl:staging:load`).
 --
 -- Reglas acordadas:
@@ -50,7 +50,21 @@ INSERT INTO staging.map_carreras VALUES
     ('INGENIERIA INDUSTRIAL',   'Ingeniería Industrial'),
     ('INGENIERIA MECANICA',     'Ingeniería Mecánica'),
     ('INGENIERIA QUIMICA',      'Ingeniería Química'),
-    ('LIC. EN DISEÑO',          'Licenciatura en Diseño');
+    ('INGENIERIA INFORMATICA',  'Ingeniería Informática'),
+    ('LIC. EN DISEÑO',          'Licenciatura en Diseño'),
+    -- Mismos textos de los PDF que resuelve la importación desde la app (004 + 010).
+    ('LIC. EN ADMINISTRACION DE EMPRESAS',    'Licenciatura en Administración de Empresas'),
+    ('LICENCIATURA EN CONTADURIA PUBLICA',    'Licenciatura en Contaduría Pública'),
+    ('LICENCIATURA EN ECONOMIA',              'Licenciatura en Economía'),
+    ('LICENCIATURA EN FINANZAS',              'Licenciatura en Finanzas'),
+    ('LICENCIATURA EN MERCADEO',              'Licenciatura en Mercadeo'),
+    ('TECNICO EN CONTADURIA',                 'Técnico en Contaduría'),
+    ('TECNICO EN MARKETING DIGITAL',          'Técnico en Marketing Digital'),
+    ('LICENCIATURA EN CIENCIAS JURIDICAS',    'Licenciatura en Ciencias Jurídicas'),
+    ('LICENCIATURA EN COMUNICACION SOCIAL',   'Licenciatura en Comunicación Social'),
+    ('LICENCIATURA EN IDIOMA INGLES',         'Licenciatura en Idioma Inglés'),
+    ('LICENCIATURA EN PSICOLOGIA',            'Licenciatura en Psicología'),
+    ('LICENCIATURA EN TEOLOGIA',              'Licenciatura en Teología');
 
 -- El ETL no crea facultades ni carreras: solo enlaza con el catálogo oficial.
 -- Un nombre que no exista aborta la carga en vez de inventar una carrera.
@@ -80,7 +94,8 @@ INSERT INTO staging.map_mojibake VALUES
     ('PLÃ?STICO',       'PLÁSTICO'),
     ('REPARACIÃ?N',     'REPARACIÓN'),
     ('SALVADOREÃ?A',    'SALVADOREÑA'),
-    ('SEÃ?ORA',         'SEÑORA');
+    ('SEÃ?ORA',         'SEÑORA'),
+    ('TÃ?CNICO',        'TÉCNICO');
 
 -- Estado del reporte → estado de project_enrollments.
 DROP TABLE IF EXISTS staging.map_estados;
@@ -181,9 +196,9 @@ SELECT
     staging.fn_limpiar(r.carnet)                  AS carnet,
     -- El mojibake viene del sistema de origen: también aparece en los PDFs.
     staging.fn_limpiar(staging.fn_corregir_mojibake(r.nombre_completo)) AS nombre_completo,
-    staging.fn_limpiar(r.cod_institucion)         AS cod_institucion,
+    fn_import_numero(staging.fn_limpiar(r.cod_institucion)) AS cod_institucion,
     staging.fn_limpiar(staging.fn_corregir_mojibake(r.institucion))     AS institucion,
-    staging.fn_limpiar(r.correlativo)             AS correlativo,
+    fn_import_numero(staging.fn_limpiar(r.correlativo)) AS correlativo,
     staging.fn_limpiar(staging.fn_corregir_mojibake(r.proyecto_nombre)) AS proyecto_nombre,
     staging.fn_carrera_sin_modalidad(r.carrera)   AS carrera_reporte,
     staging.fn_fecha(r.fecha_inicio)              AS fecha_inicio,
@@ -201,9 +216,9 @@ SELECT
     r.id,
     r.fila_excel,
     staging.fn_limpiar(r.area)                                             AS area,
-    staging.fn_limpiar(r.cod_institucion)                                  AS cod_institucion,
+    fn_import_numero(staging.fn_limpiar(r.cod_institucion))                AS cod_institucion,
     staging.fn_limpiar(staging.fn_corregir_mojibake(r.institucion))        AS institucion,
-    staging.fn_limpiar(r.correlativo)                                      AS correlativo,
+    fn_import_numero(staging.fn_limpiar(r.correlativo))                    AS correlativo,
     staging.fn_limpiar(staging.fn_corregir_mojibake(r.proyecto_nombre))    AS proyecto_nombre,
     CASE WHEN r.alumnos ~ '^\d+$' THEN r.alumnos::integer END              AS alumnos,
     staging.fn_fecha(r.fecha_inicio)                                       AS fecha_inicio,
@@ -366,7 +381,8 @@ SELECT
     -- Las fechas de PROYECTO solo existen en el Excel; si no está, se derivan de los estudiantes.
     CASE WHEN x.id IS NOT NULL THEN x.fecha_inicio ELSE p.inicio_estudiantes END AS fecha_inicio,
     CASE WHEN x.id IS NOT NULL THEN x.fecha_fin    ELSE p.cierre_estudiantes END AS fecha_cierre,
-    x.area
+    x.area,
+    x.alumnos                                       -- alumnos según el Excel (conciliación vs. su total)
 FROM pdf p
 FULL JOIN staging.v_xls_ok x
        ON x.cod_institucion = p.cod_institucion AND x.correlativo = p.correlativo;
@@ -397,7 +413,8 @@ ON CONFLICT (codigo_css) DO UPDATE
 -- 5.3 Atributo dinámico para el área temática del CSS (projects.atributos se valida
 -- contra project_fields en la app).
 INSERT INTO project_fields (clave, etiqueta, tipo, orden)
-VALUES ('area_css', 'Área temática (CSS)', 'TEXTO', 100)
+VALUES ('area_css', 'Área temática (CSS)', 'TEXTO', 100),
+       ('alumnos_css', 'Alumnos según reporte CSS', 'NUMERO', 101)
 ON CONFLICT (clave) DO NOTHING;
 
 -- 5.4 Proyectos. Llave natural: (institution_id, correlativo_css).
@@ -413,7 +430,7 @@ SELECT
     CASE WHEN t.fecha_cierre <= current_date THEN 'FINALIZADO' ELSE 'ACTIVO' END,
     t.fecha_inicio,
     t.fecha_cierre,
-    CASE WHEN t.area IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('area_css', t.area) END
+    jsonb_strip_nulls(jsonb_build_object('area_css', t.area, 'alumnos_css', t.alumnos))
 FROM tmp_projects t
 JOIN institutions i ON i.codigo_css = t.codigo_css
 ON CONFLICT (institution_id, correlativo_css) DO UPDATE

@@ -70,6 +70,11 @@ Ejecute los pasos **en este orden**. Detenga el proceso si un paso termina con u
 pnpm db:migrate
 pnpm db:migrate:status          # las 3 en estado APLICADA
 
+# 1b. (Opcional, no escribe nada) Conciliar la carpeta: cada archivo vs sus totales,
+#     Excel CSS (inscripciones, p. ej. 914) vs filas PDF (p. ej. 897) y de dónde sale la
+#     diferencia, y carreras que el catálogo no resolvería. --detalle lista los proyectos.
+pnpm etl:conciliar --data-dir data
+
 # 2. Crear el esquema temporal staging
 pnpm etl:staging:init
 

@@ -16,13 +16,22 @@ const completaron600QuerySchema = z.object({
   facultyId: z.string().uuid('facultyId debe ser un UUID').optional(),
 });
 
+const anioQuerySchema = z.object({
+  anio: z.coerce.number().int().min(1900, 'anio inválido').max(2100, 'anio inválido').optional(),
+});
+
 const carreraAnioQuerySchema = z.object({
   metrica: z.enum(['estudiantes', 'participaciones']).default('estudiantes'),
 });
 
 export const dashboardController = {
-  async summary(_req: Request, res: Response): Promise<void> {
-    res.json(await dashboardService.summary());
+  async summary(req: Request, res: Response): Promise<void> {
+    const { anio } = anioQuerySchema.parse(req.query);
+    res.json(await dashboardService.summary(anio));
+  },
+  async conciliacion(req: Request, res: Response): Promise<void> {
+    const { anio } = anioQuerySchema.parse(req.query);
+    res.json(await dashboardService.conciliacion(anio));
   },
   async mapMarkers(_req: Request, res: Response): Promise<void> {
     res.json(await dashboardService.mapMarkers());

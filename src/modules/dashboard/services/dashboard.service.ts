@@ -5,6 +5,8 @@
  * Criterios (iguales en todos los endpoints):
  *  - "Estudiante participante": participación ASIGNADA/EN_CURSO/FINALIZADA
  *    (las RETIRADA/CANCELADA no cuentan). Se cuentan estudiantes DISTINTOS.
+ *  - "Participación" (totales de inscripciones): ASIGNADA/EN_CURSO/FINALIZADA/RETIRADA;
+ *    las RETIRADA ("Abandonado" en el reporte) SÍ cuentan, por requerimiento del cliente.
  *  - "Activo": participación ASIGNADA/EN_CURSO (ocupa cupo hoy).
  *  - Año de participación = asignada_en; año de proyecto = fecha_inicio;
  *    año de horas = fecha_horas. Hora local de El Salvador.
@@ -14,6 +16,7 @@ import { selectAll, selectOne } from '../../../core/database/sql.js';
 import {
   ENROLLMENT_ACTIVE_SQL,
   ENROLLMENT_COUNTED_SQL,
+  ENROLLMENT_PARTICIPATION_SQL,
   institutionSectorToUI,
   institutionTipoToUI,
   PROJECT_GEO_JOINS,
@@ -151,7 +154,16 @@ export interface DashboardSummary {
   totalProjects: number;
   totalActiveEnrollments: number;
   totalMarkers: number;
+  /**
+   * Estudiantes DISTINTOS con una participación que cuenta (ASIGNADA/EN_CURSO/FINALIZADA)
+   * asignada en `anioExternos`, en proyectos SS_EXTERNO. Mismo criterio que el resto de
+   * métricas del año (antes solo contaba activos y sin filtro de año).
+   */
   totalStudentsExternal: number;
+  /** Participaciones del año sin deduplicar (un estudiante en 3 proyectos cuenta 3), incluidas las abandonadas. */
+  totalEnrollmentsExternal: number;
+  /** Año de la tarjeta: el pedido o, sin él, el más reciente con participaciones. */
+  anioExternos: number | null;
   /**
    * Estudiantes con participación en 2 o más proyectos distintos, en todo el
    * historial (ASIGNADA/EN_CURSO/FINALIZADA). No cuenta el proyecto de sistema de
@@ -168,6 +180,47 @@ export interface DashboardSummary {
   totalFaculties: number;
   totalCareers: number;
   totalMunicipalities: number;
+}
+
+export interface ConciliacionProyectoRow {
+  projectId: string;
+  titulo: string;
+  institucion: string;
+  codigoCss: string | null;
+  correlativo: string | null;
+  /** Alumnos que reporta el Excel CSS (null: el proyecto no viene en el Excel). */
+  alumnosCss: number | null;
+  /** Inscripciones cargadas (desde los PDF) en el año, en cualquier estado. */
+  inscripciones: number;
+  diferencia: number;
+}
+
+export interface ConciliacionResponse {
+  anio: number | null;
+  anios: number[];
+  /** Excel «Memoria de Labores»: proyectos que iniciaron en el año y su total de alumnos. */
+  reporteCss: { proyectos: number; alumnos: number };
+  sistema: {
+    /** Todas las inscripciones del año (incluye RETIRADA/CANCELADA): comparable con el Excel. */
+    inscripciones: number;
+    /** Las que cuentan como participaciones en el dashboard (incluye RETIRADA; no CANCELADA). */
+    inscripcionesContadas: number;
+    estudiantesUnicos: number;
+    /** Inscripciones en proyectos que el Excel no trae (otro correlativo o proyecto de otro año). */
+    inscripcionesSinReporte: number;
+  };
+  /** reporteCss.alumnos − sistema.inscripciones. */
+  diferencia: number;
+  /** Proyectos donde el Excel y lo cargado no coinciden (mayor diferencia primero). */
+  proyectos: ConciliacionProyectoRow[];
+}
+
+/** Año más reciente con participaciones que cuentan (null si no hay ninguna). */
+async function ultimoAnioConParticipaciones(): Promise<number | null> {
+  const row = await selectOne<{ anio: number | null }>(
+    `SELECT max(${YEAR_OF('asignada_en')}) AS anio FROM project_enrollments WHERE estado IN ${ENROLLMENT_PARTICIPATION_SQL}`,
+  );
+  return row?.anio ?? null;
 }
 
 export const dashboardService = {
@@ -212,12 +265,14 @@ export const dashboardService = {
   /**
    * Por carrera y año de participación.
    *  - 'estudiantes':     personas distintas (default, comportamiento original).
-   *  - 'participaciones': inscripciones; un estudiante en 3 proyectos cuenta 3.
+   *  - 'participaciones': inscripciones; un estudiante en 3 proyectos cuenta 3, y las
+   *                       abandonadas (RETIRADA) también cuentan.
    * Cada estudiante tiene una sola carrera: la suma de una columna (año) es el
    * total general exacto de ese año en ambos modos.
    */
   async carreraAnio(metrica: CarreraAnioMetrica = 'estudiantes'): Promise<CarreraAnioRow[]> {
     const conteo = metrica === 'participaciones' ? 'count(*)' : 'count(DISTINCT pe.student_id)';
+    const estados = metrica === 'participaciones' ? ENROLLMENT_PARTICIPATION_SQL : ENROLLMENT_COUNTED_SQL;
     const rows = await selectAll<{ carrera: string; facultad: string; anio: number; total: number }>(
       `SELECT c.nombre AS carrera, f.nombre AS facultad, ${YEAR_OF('pe.asignada_en')} AS anio,
               ${conteo}::int AS total
@@ -225,7 +280,7 @@ export const dashboardService = {
        JOIN students s  ON s.id = pe.student_id
        JOIN careers c   ON c.id = s.career_id
        JOIN faculties f ON f.id = c.faculty_id
-       WHERE pe.estado IN ${ENROLLMENT_COUNTED_SQL}
+       WHERE pe.estado IN ${estados}
        GROUP BY 1, 2, 3
        ORDER BY 1, 3`,
     );
@@ -458,20 +513,82 @@ export const dashboardService = {
     };
   },
 
-  async summary(): Promise<DashboardSummary> {
+  /**
+   * Conciliación del año contra el Excel CSS (`projects.atributos.alumnos_css`, migración 010).
+   * El Excel cuenta INSCRIPCIONES por proyecto (sin deduplicar estudiantes): 914 en 2026.
+   * Los PDF por carrera no siempre usan el mismo correlativo ni el mismo periodo que el
+   * Excel, así que la diferencia por proyecto es informativa, no un error de carga.
+   */
+  async conciliacion(anio?: number): Promise<ConciliacionResponse> {
+    const anios = (
+      await selectAll<{ anio: number }>(
+        `SELECT DISTINCT ${YEAR_OF('asignada_en')} AS anio FROM project_enrollments
+         UNION SELECT DISTINCT EXTRACT(YEAR FROM fecha_inicio)::int FROM projects
+          WHERE atributos ? 'alumnos_css' AND fecha_inicio IS NOT NULL
+         ORDER BY 1`,
+      )
+    ).map((r) => r.anio).filter((a) => a !== null);
+    const anioConsulta = anio ?? anios[anios.length - 1] ?? null;
+    const vacio: ConciliacionResponse = {
+      anio: anioConsulta, anios,
+      reporteCss: { proyectos: 0, alumnos: 0 },
+      sistema: { inscripciones: 0, inscripcionesContadas: 0, estudiantesUnicos: 0, inscripcionesSinReporte: 0 },
+      diferencia: 0, proyectos: [],
+    };
+    if (anioConsulta === null) return vacio;
+
+    const rows = await selectAll<ConciliacionProyectoRow & { contadas: number; estudiantes: string[] }>(
+      `WITH rep AS (
+         SELECT p.id, (p.atributos ->> 'alumnos_css')::int AS alumnos
+         FROM projects p
+         WHERE p.atributos ? 'alumnos_css' AND EXTRACT(YEAR FROM p.fecha_inicio) = :anio
+       ), ins AS (
+         SELECT pe.project_id AS id, count(*)::int AS inscripciones,
+                count(*) FILTER (WHERE pe.estado IN ${ENROLLMENT_PARTICIPATION_SQL})::int AS contadas,
+                array_agg(DISTINCT pe.student_id::text) AS estudiantes
+         FROM project_enrollments pe
+         WHERE ${YEAR_OF('pe.asignada_en')} = :anio
+         GROUP BY 1
+       )
+       SELECT p.id AS "projectId", p.titulo, i.nombre AS institucion, i.codigo_css AS "codigoCss",
+              p.correlativo_css AS correlativo, rep.alumnos AS "alumnosCss",
+              COALESCE(ins.inscripciones, 0) AS inscripciones, COALESCE(ins.contadas, 0) AS contadas,
+              COALESCE(ins.estudiantes, '{}') AS estudiantes,
+              COALESCE(rep.alumnos, 0) - COALESCE(ins.inscripciones, 0) AS diferencia
+       FROM rep FULL JOIN ins USING (id)
+       JOIN projects p ON p.id = COALESCE(rep.id, ins.id)
+       JOIN institutions i ON i.id = p.institution_id
+       WHERE NOT (p.atributos ? 'sistema')`,
+      { anio: anioConsulta },
+    );
+
+    const conReporte = rows.filter((r) => r.alumnosCss !== null);
+    const sum = (list: typeof rows, f: (r: (typeof rows)[number]) => number) => list.reduce((s, r) => s + f(r), 0);
+    const reporteCss = { proyectos: conReporte.length, alumnos: sum(conReporte, (r) => r.alumnosCss ?? 0) };
+    const sistema = {
+      inscripciones: sum(rows, (r) => r.inscripciones),
+      inscripcionesContadas: sum(rows, (r) => r.contadas),
+      estudiantesUnicos: new Set(rows.flatMap((r) => r.estudiantes)).size,
+      inscripcionesSinReporte: sum(rows.filter((r) => r.alumnosCss === null), (r) => r.inscripciones),
+    };
+    const proyectos = rows
+      .filter((r) => r.diferencia !== 0)
+      .map(({ contadas: _c, estudiantes: _e, ...r }) => r)
+      .sort((a, b) => Math.abs(b.diferencia) - Math.abs(a.diferencia) || a.titulo.localeCompare(b.titulo, 'es'));
+    return { ...vacio, reporteCss, sistema, diferencia: reporteCss.alumnos - sistema.inscripciones, proyectos };
+  },
+
+  async summary(anio?: number): Promise<DashboardSummary> {
+    const anioExternos = anio ?? (await ultimoAnioConParticipaciones());
     const [totals, byStatus, trendByYear, genderSummary, municipios] = await Promise.all([
-      selectOne<Omit<DashboardSummary, 'projectsByStatus' | 'trendByYear' | 'genderSummary' | 'totalMunicipalities'>>(
+      selectOne<Omit<DashboardSummary, 'projectsByStatus' | 'trendByYear' | 'genderSummary' | 'totalMunicipalities' | 'anioExternos'>>(
         `SELECT (SELECT count(*) FROM institutions)::int AS "totalInstitutions",
                 (SELECT count(*) FROM projects)::int     AS "totalProjects",
                 (SELECT count(*) FROM project_enrollments WHERE estado IN ${ENROLLMENT_ACTIVE_SQL})::int
                   AS "totalActiveEnrollments",
                 (SELECT count(*) FROM map_markers)::int  AS "totalMarkers",
-                (SELECT count(DISTINCT pe.student_id) FROM project_enrollments pe
-                   JOIN projects p ON p.id = pe.project_id
-                  WHERE pe.estado IN ${ENROLLMENT_ACTIVE_SQL}
-                    AND EXISTS (SELECT 1 FROM project_classifications pc
-                                 WHERE pc.project_id = p.id AND pc.clasificacion = 'SS_EXTERNO'))::int
-                  AS "totalStudentsExternal",
+                ext.estudiantes AS "totalStudentsExternal",
+                ext.inscripciones AS "totalEnrollmentsExternal",
                 (SELECT count(*) FROM (
                     SELECT pe.student_id FROM project_enrollments pe
                       JOIN projects p ON p.id = pe.project_id
@@ -483,7 +600,17 @@ export const dashboardService = {
                   WHERE estado IN ${ENROLLMENT_COUNTED_SQL})::int AS "totalParticipants",
                 (SELECT COALESCE(sum(horas), 0) FROM hour_movements)::int AS "totalHours",
                 (SELECT count(*) FROM faculties WHERE activo)::int AS "totalFaculties",
-                (SELECT count(*) FROM careers WHERE activo)::int   AS "totalCareers"`,
+                (SELECT count(*) FROM careers WHERE activo)::int   AS "totalCareers"
+         -- Estudiantes: sin las RETIRADA (no cuenta quien solo abandonó). Inscripciones:
+         -- con las RETIRADA ("Abandonado" en el reporte), como el resto de totales de participaciones.
+         FROM (SELECT count(DISTINCT pe.student_id) FILTER (WHERE pe.estado IN ${ENROLLMENT_COUNTED_SQL})::int AS estudiantes,
+                      count(*)::int AS inscripciones
+                 FROM project_enrollments pe
+                WHERE pe.estado IN ${ENROLLMENT_PARTICIPATION_SQL}
+                  AND ${YEAR_OF('pe.asignada_en')} = CAST(:anio AS int)
+                  AND EXISTS (SELECT 1 FROM project_classifications pc
+                               WHERE pc.project_id = pe.project_id AND pc.clasificacion = 'SS_EXTERNO')) ext`,
+        { anio: anioExternos },
       ),
       selectAll<{ estado: ProjectStatusUI; total: number }>(
         `SELECT ${projectStatusSql('p')} AS estado, count(*)::int AS total
@@ -496,6 +623,7 @@ export const dashboardService = {
     ]);
     return {
       ...totals!,
+      anioExternos,
       projectsByStatus: byStatus.map((r) => ({ estado: r.estado, total: String(r.total) })),
       trendByYear,
       genderSummary,

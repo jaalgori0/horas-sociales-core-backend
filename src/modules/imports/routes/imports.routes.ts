@@ -11,8 +11,19 @@
  *                         400 DESCUADRE_TOTALES si algún archivo no cuadra con su reporte
  *   DELETE /:id           descarta una vista previa (204)
  *
- * Todas exigen sesión (Authorization: Bearer <token> de POST /auth/login) y comparten
- * un cupo de IMPORT_RATE_LIMIT_PER_MIN peticiones por minuto por usuario.
+ * Revisión en línea (migración 013), sin editar Excel. Todas reciben { huella, justificacion }
+ * y devuelven el lote reclasificado (409 REVISION_DESACTUALIZADA si otra persona lo cambió):
+ *   PATCH  /:id/filas/:rowId            corrige estado/horas/fechas ({ cambios })
+ *   POST   /:id/filas/:rowId/excluir    excluye la fila del lote
+ *   POST   /:id/filas/:rowId/restaurar  devuelve la fila al lote
+ *   POST   /:id/decisiones              { clave, decision: ACEPTAR_REPORTE | CONSERVAR_BD }
+ *   POST   /:id/proyectos/vincular      { clave, decision: VINCULAR (+ projectId) | CREAR_NUEVO }
+ *   POST   /:id/renovar                 24 h más de vigencia
+ *   GET    /:id/revision                bitácora (original, anterior, nuevo, quién, cuándo)
+ *
+ * Todas exigen sesión (Authorization: Bearer <token> de POST /auth/login). Subir, generar
+ * la plantilla y confirmar comparten IMPORT_RATE_LIMIT_PER_MIN por minuto y usuario; la
+ * revisión (muchas acciones pequeñas) tiene su propio cupo, IMPORT_REVIEW_RATE_LIMIT_PER_MIN.
  */
 import express from 'express';
 import { env } from '../../../core/config/env.js';
@@ -23,11 +34,22 @@ import { importsController } from '../controllers/imports.controller.js';
 
 export const importsRouter = express.Router();
 
-importsRouter.use(requireAuth, rateLimit({ limit: env.IMPORT_RATE_LIMIT_PER_MIN, windowMs: 60_000 }));
+const importLimit = rateLimit({ limit: env.IMPORT_RATE_LIMIT_PER_MIN, windowMs: 60_000 });
+const reviewLimit = rateLimit({ limit: env.IMPORT_REVIEW_RATE_LIMIT_PER_MIN, windowMs: 60_000 });
 
-importsRouter.post('/', ...importUpload, importsController.create);
-importsRouter.post('/review-template', ...importUpload, importsController.reviewTemplate);
-importsRouter.get('/', importsController.list);
-importsRouter.get('/:id', importsController.getById);
-importsRouter.post('/:id/confirm', importsController.confirm);
-importsRouter.delete('/:id', importsController.discard);
+importsRouter.use(requireAuth);
+
+importsRouter.post('/', importLimit, ...importUpload, importsController.create);
+importsRouter.post('/review-template', importLimit, ...importUpload, importsController.reviewTemplate);
+importsRouter.get('/', importLimit, importsController.list);
+importsRouter.get('/:id', importLimit, importsController.getById);
+importsRouter.post('/:id/confirm', importLimit, importsController.confirm);
+importsRouter.delete('/:id', importLimit, importsController.discard);
+
+importsRouter.patch('/:id/filas/:rowId', reviewLimit, importsController.editRow);
+importsRouter.post('/:id/filas/:rowId/excluir', reviewLimit, importsController.excludeRow);
+importsRouter.post('/:id/filas/:rowId/restaurar', reviewLimit, importsController.restoreRow);
+importsRouter.post('/:id/decisiones', reviewLimit, importsController.decide);
+importsRouter.post('/:id/proyectos/vincular', reviewLimit, importsController.linkProject);
+importsRouter.post('/:id/renovar', reviewLimit, importsController.renew);
+importsRouter.get('/:id/revision', reviewLimit, importsController.reviewLog);

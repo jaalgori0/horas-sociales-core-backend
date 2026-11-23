@@ -53,6 +53,13 @@ interface ColumnSpec {
   anchor: number;
   /** Separador al unir líneas de continuación ("Abandonad" + "o" no lleva espacio). */
   joiner: string;
+  /**
+   * La celda solo admite un entero. Al dividir un fragmento, el texto que invade esta
+   * columna solo se le asigna si empieza con un número: "LICENCIATURA EN IDIOMA INGLES"
+   * (ancho 134, termina en x≈709) pasa el anchor de HORAS (705) y antes se partía en
+   * carrera "…IDIOMA" + horas "INGLES 602".
+   */
+  numeric?: boolean;
 }
 
 /** Posiciones medidas sobre los 9 PDFs. Se validan contra la cabecera de cada página. */
@@ -64,7 +71,7 @@ const COLUMNS: readonly ColumnSpec[] = [
   { key: 'codInstitucion', start: 346, anchor: 354, joiner: ' ' },
   { key: 'institucion', start: 382, anchor: 386, joiner: ' ' },
   { key: 'carrera', start: 570, anchor: 575, joiner: ' ' },
-  { key: 'horasAsignadas', start: 690, anchor: 705, joiner: ' ' },
+  { key: 'horasAsignadas', start: 690, anchor: 705, joiner: ' ', numeric: true },
   // El estado es una sola palabra; si no cabe se corta a mitad ("Abandonad" / "o").
   { key: 'estado', start: 762, anchor: 770, joiner: '' },
 ];
@@ -160,12 +167,17 @@ function splitFragment(fragment: Fragment): CellPiece[] {
     let bestDistance = Number.POSITIVE_INFINITY;
     for (let k = 0; k < rest.length; k++) {
       if (rest[k] !== ' ') continue;
+      // Columna numérica: solo se corta donde la palabra siguiente es un entero.
+      if (spec.numeric && !/^\d+(\s|$)/.test(rest.slice(k + 1))) continue;
       const distance = Math.abs(restX + (k + 1) * charWidth - spec.anchor);
       if (distance < bestDistance) {
         bestDistance = distance;
         bestSpace = k;
       }
     }
+    // Texto no numérico que rebasa una columna numérica: es de la celda actual (carrera
+    // larga). Se sigue mirando las columnas siguientes (p. ej. ESTADO).
+    if (bestSpace < 0 && spec.numeric) continue;
     if (bestSpace < 0) break; // una sola palabra que invade la columna: se deja donde empieza
 
     pieces.push({ column, text: rest.slice(0, bestSpace).trim(), estimated });

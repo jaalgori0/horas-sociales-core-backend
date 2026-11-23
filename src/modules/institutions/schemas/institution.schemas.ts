@@ -41,6 +41,8 @@ const institutionFields = {
   image_url: imageSchema,
   /** Alias aceptado por comodidad. */
   image: imageSchema,
+  /** Confirma aunque exista una institución con nombre equivalente (409 INSTITUCION_SIMILAR). */
+  confirmarSimilar: z.boolean().optional(),
 };
 
 export const createInstitutionSchema = z.object(institutionFields).strict();

@@ -69,8 +69,18 @@ export function projectStatusFromUI(value: string | null | undefined): ProjectEs
 // ─── Estado de participación ─────────────────────────────────────────────────
 /** Participaciones que ocupan un cupo hoy. */
 export const ENROLLMENT_ACTIVE_SQL = `('ASIGNADA', 'EN_CURSO')`;
-/** Participaciones que cuentan como "estudiante asignado" (incluye históricas finalizadas). */
+/**
+ * Participaciones que hacen a alguien "estudiante en servicio social" (incluye históricas
+ * finalizadas). Base de los conteos de ESTUDIANTES DISTINTOS: un alumno que solo abandonó
+ * no cuenta como estudiante en servicio.
+ */
 export const ENROLLMENT_COUNTED_SQL = `('ASIGNADA', 'EN_CURSO', 'FINALIZADA')`;
+/**
+ * Participaciones que cuentan en los totales de PARTICIPACIONES (inscripciones). Por
+ * requerimiento del cliente incluye las RETIRADA ("Abandonado" en el reporte del CSS): una
+ * participación abandonada se registró igual. CANCELADA (anulada en la app) no cuenta.
+ */
+export const ENROLLMENT_PARTICIPATION_SQL = `('ASIGNADA', 'EN_CURSO', 'FINALIZADA', 'RETIRADA')`;
 
 // ─── Tipo de institución ─────────────────────────────────────────────────────
 export const INSTITUTION_TIPOS = [

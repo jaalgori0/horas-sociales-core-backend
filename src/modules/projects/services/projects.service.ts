@@ -4,9 +4,14 @@
  */
 import type { Transaction } from 'sequelize';
 import { AppError } from '../../../core/errors/app-error.js';
-import { execReturning, selectOne, withTransaction } from '../../../core/database/sql.js';
+import { execReturning, selectAll, selectOne, withTransaction } from '../../../core/database/sql.js';
 import { institutionsService } from '../../institutions/index.js';
-import { naturalezaFromClasificaciones, projectStatusFromUI, type ProjectClasificacion } from '../../shared/labels.js';
+import {
+  naturalezaFromClasificaciones,
+  projectStatusFromUI,
+  projectStatusToUI,
+  type ProjectClasificacion,
+} from '../../shared/labels.js';
 import type { CreateProjectInput, ListProjectsQuery, UpdateProjectInput } from '../schemas/project.schemas.js';
 import { resolveCareerIds, resolveFacultyId } from './catalog-resolver.js';
 import { enrollmentsService } from './enrollments.service.js';
@@ -46,6 +51,47 @@ function resolveEstado(input: { estado?: string; status?: string }): string | un
 }
 
 /** Columnas de `projects` presentes en la entrada (undefined = no se toca). */
+/**
+ * Aviso (409 PROYECTO_SIMILAR) si en la misma institución ya hay otro proyecto (importado
+ * del CSS o creado en la app) con un nombre EQUIVALENTE (nombre_clave: mayúsculas, tildes,
+ * NFD, espacios y puntuación no importan). La lista trae el correlativo para elegir el
+ * existente. Con `confirmar` se guarda igual, salvo que choque con el índice único de
+ * proyectos sin correlativo (mismo nombre_normalizado): eso nunca se puede confirmar.
+ */
+async function assertSinProyectoSimilar(
+  args: { institutionId: string; titulo: string; exceptId: string | null; tieneCorrelativo: boolean; confirmar?: boolean },
+  t: Transaction,
+): Promise<void> {
+  const rows = await selectAll<{ id: string; titulo: string; correlativoCss: string | null; estado: string; identico: boolean }>(
+    `SELECT p.id, p.titulo, p.correlativo_css AS "correlativoCss", p.estado,
+            (p.correlativo_css IS NULL AND p.nombre_normalizado = fn_normalize_text(:titulo)) AS identico
+     FROM projects p
+     WHERE p.institution_id = :institutionId
+       AND p.nombre_clave = fn_nombre_clave(:titulo)
+       AND NOT (p.atributos ? 'sistema')
+       AND (CAST(:exceptId AS uuid) IS NULL OR p.id <> CAST(:exceptId AS uuid))
+     ORDER BY p.correlativo_css NULLS FIRST, p.titulo`,
+    { institutionId: args.institutionId, titulo: args.titulo, exceptId: args.exceptId },
+    t,
+  );
+  if (rows.length === 0) return;
+  // Dos proyectos SIN correlativo con el mismo nombre_normalizado violan uq_projects_institution_nombre.
+  const bloqueante = !args.tieneCorrelativo && rows.some((r) => r.identico);
+  if (args.confirmar && !bloqueante) return;
+  throw AppError.conflict(
+    bloqueante
+      ? 'Ya existe un proyecto creado en la app con el mismo nombre en esta institución'
+      : 'Ya existe un proyecto con un nombre equivalente en esta institución',
+    {
+      code: 'PROYECTO_SIMILAR',
+      puedeConfirmar: !bloqueante,
+      similares: rows.map((r) => ({
+        id: r.id, titulo: r.titulo, correlativoCss: r.correlativoCss, estado: projectStatusToUI(r.estado),
+      })),
+    },
+  );
+}
+
 function projectColumns(input: UpdateProjectInput): Record<string, unknown> {
   const columns: Record<string, unknown> = {};
   if (input.titulo !== undefined) columns.titulo = input.titulo;
@@ -178,7 +224,12 @@ export const projectsService = {
           ubicacion: input.institutionLocation,
           descripcion: input.institutionDescription,
           image: input.institutionImage,
+          confirmarSimilar: input.confirmarSimilar,
         },
+        t,
+      );
+      await assertSinProyectoSimilar(
+        { institutionId, titulo: input.titulo, exceptId: null, tieneCorrelativo: false, confirmar: input.confirmarSimilar },
         t,
       );
       const facultyId = await resolveFacultyId(input, t);
@@ -214,8 +265,11 @@ export const projectsService = {
 
   async update(id: string, input: UpdateProjectInput): Promise<ProjectDetailDTO> {
     return withTransaction(async (t) => {
-      const current = await selectOne<{ institution_id: string; fecha_cierre: string | null; es_sistema: boolean }>(
-        `SELECT institution_id, to_char(fecha_cierre, 'YYYY-MM-DD') AS fecha_cierre, (atributos ? 'sistema') AS es_sistema
+      const current = await selectOne<{
+        institution_id: string; fecha_cierre: string | null; es_sistema: boolean; titulo: string; correlativo_css: string | null;
+      }>(
+        `SELECT institution_id, to_char(fecha_cierre, 'YYYY-MM-DD') AS fecha_cierre, (atributos ? 'sistema') AS es_sistema,
+                titulo, correlativo_css
          FROM projects WHERE id = :id FOR UPDATE`,
         { id },
         t,
@@ -239,6 +293,19 @@ export const projectsService = {
             ubicacion: input.institutionLocation,
             descripcion: input.institutionDescription,
             image: input.institutionImage,
+            confirmarSimilar: input.confirmarSimilar,
+          },
+          t,
+        );
+      }
+      // Solo si cambia el título o la institución (editar otros campos no vuelve a avisar).
+      const nuevaInstitucion = (columns.institution_id as string | undefined) ?? current.institution_id;
+      const nuevoTitulo = input.titulo ?? current.titulo;
+      if (nuevaInstitucion !== current.institution_id || nuevoTitulo !== current.titulo) {
+        await assertSinProyectoSimilar(
+          {
+            institutionId: nuevaInstitucion, titulo: nuevoTitulo, exceptId: id,
+            tieneCorrelativo: current.correlativo_css !== null, confirmar: input.confirmarSimilar,
           },
           t,
         );

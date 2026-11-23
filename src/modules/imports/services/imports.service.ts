@@ -2,11 +2,14 @@
  * Importación masiva por lotes.
  *
  *   createPreview  archivos → filas del lote → clasificación → vista previa (no toca el maestro)
+ *                  + impacto estimado de confirmar (simulación real dentro de un SAVEPOINT)
  *   confirm        advisory lock → reclasifica → si la clasificación cambió, 409 con la nueva
  *                  vista previa; si no, inserción estricta, enriquecimiento (género y
  *                  ubicación inferidos, ver enrichment.service.ts) y lote CONFIRMADO
  *   getBatch       lote + archivos + resumen + ítems (filtrables)
  *   discard        descarta una vista previa y libera sus filas
+ *
+ * Revisión en línea (ediciones, exclusiones y decisiones): import-review.service.ts.
  *
  * Aislamiento: cada lote tiene su `batch_id` y la clasificación usa tablas temporales
  * de la conexión. Dos vistas previas pueden correr a la vez; las confirmaciones se
@@ -22,6 +25,7 @@ import { parseUploadedFiles, type ParsedFile, type UploadedFile } from './file-p
 import { enriquecerMaestro } from './enrichment.service.js';
 import { applyBatch, classifyBatch, setBatchContext, type ApplyResult } from './import-sql.js';
 import { buildReviewTemplate, needsReview } from '../../../etl/extract/xlsx-plantilla-revision.js';
+import { HORAS_REQUISITO } from '../../students/index.js';
 
 /** Distinto del lock de migraciones. Serializa las confirmaciones de importación. */
 const CONFIRM_LOCK_KEY = 7_264_031_118;
@@ -38,13 +42,39 @@ export interface BatchSummary {
   porEntidad: Partial<Record<ItemEntidad, Conteo>>;
   /** Horas que entrarán con las participaciones nuevas. */
   horasNuevas: number;
+  /** Participaciones existentes que se actualizarán (Activo → Finalizada o ajuste aceptado). */
+  actualizar: number;
+  /** Horas CSS que suman esas actualizaciones (reporte − base). */
+  horasActualizadas: number;
+  /** Efecto estimado de confirmar sobre el maestro (null en la confirmación). */
+  impacto?: ImpactoEstimado | null;
 }
+
+/** Foto de los contadores del maestro que cambia una importación. */
+export interface MetricasMaestro {
+  participacionesActivas: number;
+  participacionesFinalizadas: number;
+  participacionesRetiradas: number;
+  participantes: number;
+  horasTotales: number;
+  proyectosFinalizados: number;
+  estudiantesCon600: number;
+}
+
+export type ImpactoEstimado =
+  | { ok: true; antes: MetricasMaestro; despues: MetricasMaestro; delta: MetricasMaestro }
+  /** La simulación falló: confirmar también fallaría. */
+  | { ok: false; error: string };
 
 interface Conciliacion {
   control: string;
   extraido: number;
   reporte: number | null;
   ok: boolean;
+  /** Filas/horas quitadas o cambiadas en la revisión en línea, todas con justificación. */
+  ajuste?: number;
+  /** Lo que se extrajo del archivo antes de la revisión. */
+  extraidoOriginal?: number;
 }
 
 // -----------------------------------------------------------------------------
@@ -252,23 +282,52 @@ function emptyConteo(): Conteo {
   return { NUEVO: 0, IGNORADO: 0, ADVERTENCIA: 0, CONFLICTO: 0 };
 }
 
+/**
+ * Huella del lote: clasificación (entidad, clave, estado, acción, campos a completar,
+ * horas) + estado de la revisión en línea (correcciones, exclusiones y decisiones).
+ * Cualquier edición la cambia: así se detectan cambios concurrentes entre la vista que
+ * tiene el usuario y la confirmación.
+ */
 async function summarizeItems(batchId: string, t: Transaction): Promise<{ huella: string; resumen: BatchSummary }> {
   const counts = await selectAll<{ entidad: ItemEntidad; estado: ItemEstado; n: string }>(
     'SELECT entidad, estado, count(*) AS n FROM import_items WHERE batch_id = :batchId GROUP BY 1, 2',
     { batchId },
     t,
   );
-  const extra = await selectOne<{ huella: string; horas: string }>(
+  const extra = await selectOne<{ huella: string; horas: string; actualizar: string; horas_actualizadas: string }>(
     `SELECT
-       md5(coalesce(string_agg(
-         concat_ws('|', entidad, clave, estado, accion, completar::text), E'\\n' ORDER BY entidad, clave), '')) AS huella,
-       coalesce(sum((datos ->> 'horas')::int) FILTER (WHERE entidad = 'PARTICIPACION' AND accion = 'INSERTAR'), 0) AS horas
+       md5(
+         coalesce((SELECT string_agg(concat_ws('|', entidad, clave, estado, accion, completar::text, datos ->> 'horas'),
+                                     E'\\n' ORDER BY entidad, clave)
+                   FROM import_items WHERE batch_id = :batchId), '')
+         || '#' ||
+         coalesce((SELECT string_agg(concat_ws('|', pdf_row_id, estado, horas_asignadas, fecha_inicio, fecha_fin, excluida),
+                                     E'\\n' ORDER BY pdf_row_id)
+                   FROM import_pdf_row_overrides WHERE batch_id = :batchId), '')
+         || '#' ||
+         coalesce((SELECT string_agg(concat_ws('|', clave, decision, horas_existentes, horas_reporte),
+                                     E'\\n' ORDER BY clave)
+                   FROM import_enrollment_decisions WHERE batch_id = :batchId), '')
+         || '#' ||
+         coalesce((SELECT string_agg(concat_ws('|', clave, decision, project_id), E'\\n' ORDER BY clave)
+                   FROM import_project_links WHERE batch_id = :batchId), '')
+       ) AS huella,
+       coalesce(sum((datos ->> 'horas')::int) FILTER (WHERE entidad = 'PARTICIPACION' AND accion = 'INSERTAR'), 0) AS horas,
+       count(*) FILTER (WHERE accion = 'ACTUALIZAR') AS actualizar,
+       coalesce(sum((datos ->> 'horas')::int - (existente ->> 'horas')::int) FILTER (WHERE accion = 'ACTUALIZAR'), 0)
+         AS horas_actualizadas
      FROM import_items WHERE batch_id = :batchId`,
     { batchId },
     t,
   );
 
-  const resumen: BatchSummary = { total: emptyConteo(), porEntidad: {}, horasNuevas: Number(extra?.horas ?? 0) };
+  const resumen: BatchSummary = {
+    total: emptyConteo(),
+    porEntidad: {},
+    horasNuevas: Number(extra?.horas ?? 0),
+    actualizar: Number(extra?.actualizar ?? 0),
+    horasActualizadas: Number(extra?.horas_actualizadas ?? 0),
+  };
   for (const row of counts) {
     const n = Number(row.n);
     resumen.total[row.estado] += n;
@@ -277,10 +336,107 @@ async function summarizeItems(batchId: string, t: Transaction): Promise<{ huella
   return { huella: extra?.huella ?? '', resumen };
 }
 
-async function classifyAndSummarize(batchId: string, t: Transaction) {
+async function medirMaestro(t: Transaction): Promise<MetricasMaestro> {
+  const row = await selectOne<MetricasMaestro>(
+    `SELECT
+       (SELECT count(*) FROM project_enrollments WHERE estado IN ('ASIGNADA', 'EN_CURSO'))::int AS "participacionesActivas",
+       (SELECT count(*) FROM project_enrollments WHERE estado = 'FINALIZADA')::int AS "participacionesFinalizadas",
+       (SELECT count(*) FROM project_enrollments WHERE estado IN ('RETIRADA', 'CANCELADA'))::int AS "participacionesRetiradas",
+       (SELECT count(DISTINCT student_id) FROM project_enrollments
+         WHERE estado IN ('ASIGNADA', 'EN_CURSO', 'FINALIZADA'))::int AS participantes,
+       (SELECT coalesce(sum(horas), 0) FROM hour_movements)::int AS "horasTotales",
+       (SELECT count(*) FROM projects WHERE estado = 'FINALIZADO')::int AS "proyectosFinalizados",
+       (SELECT count(*) FROM (SELECT pe.student_id FROM hour_movements hm
+                                JOIN project_enrollments pe ON pe.id = hm.enrollment_id
+                               GROUP BY 1 HAVING sum(hm.horas) >= :requisito) x)::int AS "estudiantesCon600"`,
+    { requisito: HORAS_REQUISITO },
+    t,
+  );
+  return row!;
+}
+
+/**
+ * Impacto de confirmar: aplica el lote de verdad dentro de un SAVEPOINT, mide el maestro
+ * antes y después, y revierte. Es la misma ruta de escritura que la confirmación, así que
+ * el número es exacto (salvo que el maestro cambie antes de confirmar: lo detecta la huella).
+ */
+async function estimarImpacto(t: Transaction): Promise<ImpactoEstimado> {
+  const antes = await medirMaestro(t);
+  await sequelize.query('SAVEPOINT impacto_vista_previa', { transaction: t });
+  try {
+    await applyBatch(t);
+    const despues = await medirMaestro(t);
+    const delta = Object.fromEntries(
+      (Object.keys(antes) as Array<keyof MetricasMaestro>).map((k) => [k, despues[k] - antes[k]]),
+    ) as unknown as MetricasMaestro;
+    return { ok: true, antes, despues, delta };
+  } catch (error) {
+    const original = (error as { original?: { message?: string } }).original;
+    return { ok: false, error: original?.message ?? (error as Error).message };
+  } finally {
+    await sequelize.query('ROLLBACK TO SAVEPOINT impacto_vista_previa', { transaction: t });
+    await sequelize.query('RELEASE SAVEPOINT impacto_vista_previa', { transaction: t });
+  }
+}
+
+/** Clasifica el lote. Con `impacto`, además simula la confirmación (vista previa y ediciones). */
+export async function classifyAndSummarize(batchId: string, t: Transaction, opts: { impacto?: boolean } = {}) {
   await setBatchContext(batchId, t);
   await classifyBatch(t);
-  return summarizeItems(batchId, t);
+  const result = await summarizeItems(batchId, t);
+  if (opts.impacto) result.resumen.impacto = await estimarImpacto(t);
+  return result;
+}
+
+/**
+ * Cuadre de cada archivo de horas tras la revisión en línea. `extraido` = filas/horas
+ * vigentes (sin excluidas, con correcciones); `ajuste` = lo quitado o cambiado en la
+ * revisión, siempre con justificación (equivale a corregir la hoja Control de la plantilla).
+ * `ok` exige que lo extraído ORIGINALMENTE cuadre con el reporte: la revisión puede
+ * explicar diferencias, nunca tapar un descuadre de la extracción.
+ */
+export async function recalcularConciliacion(batchId: string, t: Transaction): Promise<void> {
+  const rows = await selectAll<{
+    archivo: string; conciliacion: Conciliacion[];
+    filas_original: number; filas_vigentes: number; horas_original: number; horas_vigentes: number;
+  }>(
+    `SELECT f.archivo, f.conciliacion,
+            count(r.id)::int AS filas_original,
+            count(r.id) FILTER (WHERE NOT coalesce(o.excluida, false))::int AS filas_vigentes,
+            coalesce(sum(CASE WHEN r.horas_asignadas ~ '^\\d+$' THEN r.horas_asignadas::bigint END), 0)::int AS horas_original,
+            coalesce(sum(CASE WHEN NOT coalesce(o.excluida, false) AND coalesce(o.horas_asignadas, r.horas_asignadas) ~ '^\\d+$'
+                              THEN coalesce(o.horas_asignadas, r.horas_asignadas)::bigint END), 0)::int AS horas_vigentes
+     FROM import_files f
+     JOIN import_pdf_rows r ON r.batch_id = f.batch_id AND r.archivo = f.archivo
+     LEFT JOIN import_pdf_row_overrides o ON o.batch_id = r.batch_id AND o.pdf_row_id = r.id
+     WHERE f.batch_id = :batchId AND f.estado = 'PROCESADO'
+       AND f.tipo IN ('PDF_DETALLE_HORAS', 'XLSX_PLANTILLA_REVISION')
+     GROUP BY f.archivo, f.conciliacion`,
+    { batchId },
+    t,
+  );
+  for (const row of rows) {
+    const valores: Record<string, { original: number; vigente: number }> = {
+      alumnos: { original: row.filas_original, vigente: row.filas_vigentes },
+      horas: { original: row.horas_original, vigente: row.horas_vigentes },
+    };
+    const conciliacion = row.conciliacion.map((c) => {
+      const v = valores[c.control];
+      if (!v) return c;
+      const ajuste = v.original - v.vigente;
+      return {
+        control: c.control,
+        extraido: v.vigente,
+        reporte: c.reporte,
+        ok: c.reporte === null || v.original === c.reporte,
+        ...(ajuste !== 0 ? { ajuste, extraidoOriginal: v.original } : {}),
+      };
+    });
+    await sequelize.query(
+      'UPDATE import_files SET conciliacion = :conciliacion WHERE batch_id = :batchId AND archivo = :archivo',
+      { replacements: { batchId, archivo: row.archivo, conciliacion: JSON.stringify(conciliacion) }, transaction: t },
+    );
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -297,10 +453,21 @@ interface BatchRow {
   resumen: BatchSummary;
   resultado: ApplyResult | null;
   expirado: boolean;
+  huella: string | null;
+  ediciones: number;
+  exclusiones: number;
+  decisiones: number;
 }
 
-const BATCH_COLUMNS = `id, estado, creado_por, creado_en, expira_en, confirmado_por, confirmado_en,
-                       resumen, resultado, (estado = 'PREVISUALIZADO' AND expira_en < now()) AS expirado`;
+/** Días que se conserva una vista previa VENCIDA con revisión guardada (para renovarla). */
+export const DIAS_GRACIA_REVISION = 7;
+
+export const BATCH_COLUMNS = `id, estado, creado_por, creado_en, expira_en, confirmado_por, confirmado_en,
+                       resumen, resultado, (estado = 'PREVISUALIZADO' AND expira_en < now()) AS expirado, huella,
+                       (SELECT count(*) FROM import_pdf_row_overrides o WHERE o.batch_id = import_batches.id AND NOT o.excluida)::int AS ediciones,
+                       (SELECT count(*) FROM import_pdf_row_overrides o WHERE o.batch_id = import_batches.id AND o.excluida)::int AS exclusiones,
+                       ((SELECT count(*) FROM import_enrollment_decisions d WHERE d.batch_id = import_batches.id)
+                        + (SELECT count(*) FROM import_project_links l WHERE l.batch_id = import_batches.id))::int AS decisiones`;
 
 function batchDTO(row: BatchRow) {
   return {
@@ -314,6 +481,9 @@ function batchDTO(row: BatchRow) {
     confirmadoEn: row.confirmado_en,
     resumen: row.resumen,
     resultado: row.resultado,
+    /** El frontend la devuelve al editar y al confirmar: detecta cambios concurrentes. */
+    huella: row.huella,
+    revision: { ediciones: row.ediciones, exclusiones: row.exclusiones, decisiones: row.decisiones },
   };
 }
 
@@ -429,10 +599,17 @@ export const importsService = {
     const parsed = await parseUploadedFiles(files);
 
     const batchId = await withTransaction(async (t) => {
-      // Vistas previas vencidas: se liberan sus filas (cascada) en cada lote nuevo.
+      // Vistas previas vencidas: se liberan sus filas (cascada) en cada lote nuevo. Las que
+      // tienen revisión en línea guardada (correcciones, exclusiones o decisiones) se
+      // conservan DIAS_GRACIA_REVISION días más para poder renovarlas sin perder ese trabajo.
       await sequelize.query(
-        "DELETE FROM import_batches WHERE estado = 'PREVISUALIZADO' AND expira_en < now()",
-        { transaction: t },
+        `DELETE FROM import_batches b
+         WHERE b.estado = 'PREVISUALIZADO' AND b.expira_en < now()
+           AND (b.expira_en < now() - make_interval(days => :dias)
+                OR NOT (EXISTS (SELECT 1 FROM import_pdf_row_overrides o WHERE o.batch_id = b.id)
+                        OR EXISTS (SELECT 1 FROM import_enrollment_decisions d WHERE d.batch_id = b.id)
+                        OR EXISTS (SELECT 1 FROM import_project_links l WHERE l.batch_id = b.id)))`,
+        { replacements: { dias: DIAS_GRACIA_REVISION }, transaction: t },
       );
       const [created] = await execReturning<{ id: string }>(
         'INSERT INTO import_batches DEFAULT VALUES RETURNING id',
@@ -441,7 +618,7 @@ export const importsService = {
       );
       const id = created!.id;
       await storeFiles(id, parsed, t);
-      const { huella, resumen } = await classifyAndSummarize(id, t);
+      const { huella, resumen } = await classifyAndSummarize(id, t, { impacto: true });
       await sequelize.query('UPDATE import_batches SET huella = :huella, resumen = :resumen WHERE id = :id', {
         replacements: { id, huella, resumen: JSON.stringify(resumen) },
         transaction: t,
@@ -457,23 +634,27 @@ export const importsService = {
   async list(limit = 50) {
     const rows = await selectAll<BatchRow & { archivos: string }>(
       `SELECT ${BATCH_COLUMNS},
-              (SELECT count(*) FROM import_files f WHERE f.batch_id = b.id) AS archivos
-       FROM import_batches b ORDER BY creado_en DESC LIMIT :limit`,
+              (SELECT count(*) FROM import_files f WHERE f.batch_id = import_batches.id) AS archivos
+       FROM import_batches ORDER BY creado_en DESC LIMIT :limit`,
       { limit },
     );
     return rows.map((row) => ({ ...batchDTO(row), archivos: Number(row.archivos) }));
   },
 
-  /** `actor`: quién confirma (confirmado_por y auditoría de cada fila escrita). */
-  async confirm(id: string, actor: string): Promise<BatchDetailDTO> {
+  /**
+   * `actor`: quién confirma (confirmado_por y auditoría de cada fila escrita).
+   * `huellaVista`: huella del lote que el usuario tiene en pantalla. Si otra persona editó
+   * el lote (o el maestro cambió) desde entonces, 409 PREVIEW_DESACTUALIZADA.
+   */
+  async confirm(id: string, actor: string, huellaVista?: string): Promise<BatchDetailDTO> {
     const outcome = await withTransaction(async (t) => {
       // Una confirmación a la vez: la siguiente espera y reclasifica con lo ya escrito.
       await sequelize.query('SELECT pg_advisory_xact_lock(:key)', {
         replacements: { key: CONFIRM_LOCK_KEY },
         transaction: t,
       });
-      const batch = await selectOne<BatchRow & { huella: string | null }>(
-        `SELECT ${BATCH_COLUMNS}, huella FROM import_batches WHERE id = :id FOR UPDATE`,
+      const batch = await selectOne<BatchRow>(
+        `SELECT ${BATCH_COLUMNS} FROM import_batches WHERE id = :id FOR UPDATE`,
         { id },
         t,
       );
@@ -481,6 +662,8 @@ export const importsService = {
       if (batch.estado === 'CONFIRMADO') throw AppError.conflict('El lote ya fue confirmado', { confirmadoEn: batch.confirmado_en });
       if (batch.estado === 'DESCARTADO') throw AppError.conflict('El lote fue descartado; suba los archivos de nuevo');
       if (batch.expirado) throw AppError.conflict('La vista previa expiró; suba los archivos de nuevo', { expiraEn: batch.expira_en });
+      // Revisión concurrente: lo que se ve en pantalla ya no es lo que se va a confirmar.
+      if (huellaVista !== undefined && huellaVista !== batch.huella) return 'desactualizado' as const;
 
       // Misma regla que el frontend, aplicada aquí para que no se salte llamando a la API directo:
       // si lo extraído no cuadra con los totales impresos del reporte, la extracción no es confiable.
@@ -506,7 +689,8 @@ export const importsService = {
       // El maestro pudo cambiar desde la vista previa (otra importación, edición en la app).
       const { huella, resumen } = await classifyAndSummarize(id, t);
       if (huella !== batch.huella) {
-        // Se guarda la clasificación nueva (COMMIT) para que el usuario la revise.
+        // Se guarda la clasificación nueva (COMMIT) para que el usuario la revise, con su impacto.
+        resumen.impacto = await estimarImpacto(t);
         await sequelize.query('UPDATE import_batches SET huella = :huella, resumen = :resumen WHERE id = :id', {
           replacements: { id, huella, resumen: JSON.stringify(resumen) },
           transaction: t,

@@ -32,6 +32,8 @@ const envSchema = z.object({
   IMPORT_MAX_TOTAL_MB: z.coerce.number().int().min(1).max(500).default(50),
   // Peticiones por minuto a /imports por usuario autenticado.
   IMPORT_RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).max(1000).default(20),
+  /** Revisión en línea de la vista previa (editar/excluir/decidir): acciones pequeñas y frecuentes. */
+  IMPORT_REVIEW_RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).max(2000).default(120),
 
   DB_HOST: z.string().min(1),
   DB_PORT: z.coerce.number().int().min(1).max(65535).default(5432),

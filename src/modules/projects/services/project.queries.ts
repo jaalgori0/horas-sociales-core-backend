@@ -14,7 +14,7 @@ import type { Transaction } from 'sequelize';
 import { escapeLike, selectAll } from '../../../core/database/sql.js';
 import {
   ENROLLMENT_ACTIVE_SQL,
-  ENROLLMENT_COUNTED_SQL,
+  ENROLLMENT_PARTICIPATION_SQL,
   facultyShortLabel,
   PROJECT_GEO_JOINS,
   institutionTipoToUI,
@@ -240,10 +240,12 @@ const PROJECT_BASE_SQL = `
         LIMIT 1)
   ) fac ON true
   LEFT JOIN LATERAL (
-      SELECT count(*) FILTER (WHERE pe.estado IN ${ENROLLMENT_COUNTED_SQL}) AS asignados,
+      -- Participaciones del proyecto: incluyen las abandonadas (RETIRADA), igual que el reporte del CSS.
+      -- Los cupos ocupados siguen siendo solo las activas.
+      SELECT count(*) FILTER (WHERE pe.estado IN ${ENROLLMENT_PARTICIPATION_SQL}) AS asignados,
              count(*) FILTER (WHERE pe.estado IN ${ENROLLMENT_ACTIVE_SQL})  AS ocupados,
-             count(*) FILTER (WHERE pe.estado IN ${ENROLLMENT_COUNTED_SQL} AND s.genero = 'HOMBRE') AS hombres,
-             count(*) FILTER (WHERE pe.estado IN ${ENROLLMENT_COUNTED_SQL} AND s.genero = 'MUJER')  AS mujeres
+             count(*) FILTER (WHERE pe.estado IN ${ENROLLMENT_PARTICIPATION_SQL} AND s.genero = 'HOMBRE') AS hombres,
+             count(*) FILTER (WHERE pe.estado IN ${ENROLLMENT_PARTICIPATION_SQL} AND s.genero = 'MUJER')  AS mujeres
         FROM project_enrollments pe JOIN students s ON s.id = pe.student_id
        WHERE pe.project_id = p.id
   ) st ON true

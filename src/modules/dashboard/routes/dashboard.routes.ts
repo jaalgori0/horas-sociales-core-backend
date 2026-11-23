@@ -1,7 +1,8 @@
 /**
  * Rutas del dashboard. Montadas en `${API_PREFIX}/dashboard` (solo lectura).
  *
- *   GET /summary                 KPIs, proyectos por estado, tendencia y género
+ *   GET /summary                 KPIs, proyectos por estado, tendencia y género (?anio: tarjeta de externos)
+ *   GET /conciliacion            Excel CSS (alumnos por proyecto) vs. inscripciones cargadas (?anio)
  *   GET /map-markers             Marcadores del mapa (tabla map_markers)
  *   GET /carrera-anio            Por carrera y año (?metrica=estudiantes|participaciones)
  *   GET /genero                  Participantes por género (+ sinDato) (?facultyId)
@@ -32,3 +33,4 @@ dashboardRouter.get('/metricas-institucion', dashboardController.tablaInstitucio
 dashboardRouter.get('/tabla-institucion', dashboardController.tablaInstitucion);
 dashboardRouter.get('/estudiantes-multiproyecto', dashboardController.estudiantesMultiProyecto);
 dashboardRouter.get('/completaron-600', dashboardController.completaron600);
+dashboardRouter.get('/conciliacion', dashboardController.conciliacion);

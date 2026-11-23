@@ -5,12 +5,17 @@
 -- (la confirmación reclasifica bajo advisory lock justo antes de esto).
 --
 -- Reglas:
---   • Solo se escribe lo clasificado como INSERTAR o COMPLETAR. CONFLICTO nunca se toca.
+--   • Solo se escribe lo clasificado como INSERTAR, COMPLETAR o ACTUALIZAR. CONFLICTO nunca se toca.
 --   • Todo INSERT usa ON CONFLICT DO NOTHING: si algo apareció entre medio, se ignora.
+--   • Códigos CSS y correlativos se comparan sin ceros a la izquierda (fn_import_numero,
+--     migración 014), igual que en classify.sql; se guardan ya normalizados.
 --   • COMPLETAR solo llena columnas en NULL (coalesce(existente, nuevo)); el trigger
 --     fn_auditoria deja el antes/después en `auditoria` con actor import:<lote>.
---   • Las horas solo se registran sobre participaciones CREADAS en este lote: una
---     participación existente jamás recibe horas nuevas por importación.
+--   • Las horas se registran sobre participaciones CREADAS en este lote y, desde la
+--     migración 013, sobre participaciones existentes clasificadas ACTUALIZAR
+--     (Activo → Finalizada, o ajuste de horas aceptado explícitamente). En ese caso solo
+--     se toca el movimiento del CSS (origen IMPORTACION, solicitud_id determinista): las
+--     horas MANUAL nunca se modifican.
 --
 -- Formato: cada bloque "-- @step <nombre>" se ejecuta por separado y devuelve
 -- (opcionalmente) una fila con la columna `n` = filas escritas.
@@ -22,6 +27,9 @@ CREATE TEMP TABLE IF NOT EXISTS t_enr_nuevas (
     project_id    uuid NOT NULL,
     student_id    uuid NOT NULL
 ) ON COMMIT DROP;
+CREATE TEMP TABLE IF NOT EXISTS t_enr_actualizadas (
+    enrollment_id uuid NOT NULL
+) ON COMMIT DROP;
 
 -- @step instituciones_completadas
 WITH upd AS (
@@ -31,7 +39,7 @@ WITH upd AS (
     WHERE t.accion = 'COMPLETAR'
       AND i.id = t.institution_id
       AND i.codigo_css IS NULL
-      AND NOT EXISTS (SELECT 1 FROM institutions o WHERE o.codigo_css = t.codigo_css)
+      AND NOT EXISTS (SELECT 1 FROM institutions o WHERE fn_import_numero(o.codigo_css) = t.codigo_css)
     RETURNING 1
 )
 SELECT count(*)::int AS n FROM upd;
@@ -58,11 +66,11 @@ WITH upd AS (
     SET correlativo_css = coalesce(p.correlativo_css, t.completar ->> 'correlativo_css'),
         fecha_inicio    = coalesce(p.fecha_inicio, (t.completar ->> 'fecha_inicio')::date),
         fecha_cierre    = coalesce(p.fecha_cierre, (t.completar ->> 'fecha_cierre')::date),
-        atributos       = CASE
-                              WHEN p.atributos -> 'area_css' IS NULL AND t.completar ->> 'area_css' IS NOT NULL
-                              THEN p.atributos || jsonb_build_object('area_css', t.completar ->> 'area_css')
-                              ELSE p.atributos
-                          END
+        -- area_css solo completa vacíos; alumnos_css (foto del último Excel) se reemplaza.
+        atributos       = p.atributos || jsonb_strip_nulls(jsonb_build_object(
+                              'area_css',    CASE WHEN p.atributos -> 'area_css' IS NULL
+                                                  THEN t.completar -> 'area_css' END,
+                              'alumnos_css', t.completar -> 'alumnos_css'))
     FROM t_proj_c t
     WHERE t.accion = 'COMPLETAR' AND p.id = t.project_id
     RETURNING 1
@@ -78,9 +86,9 @@ WITH ins AS (
            'EXTERNA',
            CASE WHEN t.fecha_cierre <= current_date THEN 'FINALIZADO' ELSE 'ACTIVO' END,
            t.fecha_inicio, t.fecha_cierre,
-           CASE WHEN t.area IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('area_css', t.area) END
+           jsonb_strip_nulls(jsonb_build_object('area_css', t.area, 'alumnos_css', t.alumnos))
     FROM t_proj_c t
-    JOIN institutions i ON i.codigo_css = t.codigo_css
+    JOIN institutions i ON fn_import_numero(i.codigo_css) = t.codigo_css
     WHERE t.accion = 'INSERTAR'
     ON CONFLICT DO NOTHING
     RETURNING 1
@@ -104,8 +112,8 @@ WITH ins AS (
     SELECT p.id, s.id, 'ESTUDIANTE', t.estado, t.asignada_en, t.cerrada_en
     FROM t_enr_c t
     JOIN students s     ON s.carnet = t.carnet
-    JOIN institutions i ON i.codigo_css = t.cod_institucion
-    JOIN projects p     ON p.institution_id = i.id AND p.correlativo_css = t.correlativo
+    JOIN institutions i ON fn_import_numero(i.codigo_css) = t.cod_institucion
+    JOIN projects p     ON p.institution_id = i.id AND fn_import_numero(p.correlativo_css) = t.correlativo
     WHERE t.accion = 'INSERTAR'
     ON CONFLICT DO NOTHING
     RETURNING id, project_id, student_id
@@ -116,14 +124,71 @@ nuevas AS (
 )
 SELECT count(*)::int AS n FROM nuevas;
 
+-- @step participaciones_actualizadas
+-- Participación existente (estudiante + proyecto) clasificada ACTUALIZAR: estado y cierre
+-- del reporte. Solo si la base sigue como se clasificó (si cambió entre la clasificación y
+-- este paso, no se escribe y la reimportación la mostrará de nuevo).
+WITH upd AS (
+    UPDATE project_enrollments pe
+    SET estado = t.estado, cerrada_en = t.cerrada_en
+    FROM t_enr_c t
+    WHERE t.accion = 'ACTUALIZAR'
+      AND pe.id = t.enrollment_id
+      AND pe.estado = t.e_estado
+      AND pe.asignada_en = t.e_asignada
+      AND pe.cerrada_en IS NOT DISTINCT FROM t.e_cerrada
+    RETURNING pe.id
+),
+hechas AS (
+    INSERT INTO t_enr_actualizadas SELECT id FROM upd
+    RETURNING 1
+)
+SELECT count(*)::int AS n FROM hechas;
+
+-- @step movimientos_actualizados
+-- Horas del CSS de esas participaciones: el movimiento con el solicitud_id determinista
+-- (el mismo que usa la inserción) queda con lo que falta para que el total CSS de la
+-- participación sea el del reporte. Se crea si no existía (Activo con 0 h); nunca se
+-- duplica; solo se actualiza si es de origen IMPORTACION y de esa participación.
+WITH obj AS (
+    SELECT t.enrollment_id, t.horas, t.fecha_fin, t.archivo, t.pagina, p.naturaleza,
+           md5(format('etl-css|%s|%s|%s', t.carnet, t.cod_institucion, t.correlativo))::uuid AS sid
+    FROM t_enr_c t
+    JOIN t_enr_actualizadas a ON a.enrollment_id = t.enrollment_id
+    JOIN projects p ON p.id = t.project_id
+),
+calc AS (
+    SELECT o.*,
+           o.horas - coalesce((SELECT sum(hm.horas) FROM hour_movements hm
+                               WHERE hm.enrollment_id = o.enrollment_id
+                                 AND hm.origen <> 'MANUAL'
+                                 AND hm.solicitud_id IS DISTINCT FROM o.sid), 0)::int AS horas_mov
+    FROM obj o
+),
+up AS (
+    INSERT INTO hour_movements (enrollment_id, horas, naturaleza, fecha_horas, descripcion, solicitud_id, origen)
+    SELECT c.enrollment_id, c.horas_mov, c.naturaleza, c.fecha_fin,
+           format('Importación %s (actualización): %s, p. %s', fn_import_actual(), c.archivo, c.pagina),
+           c.sid, 'IMPORTACION'
+    FROM calc c
+    WHERE c.horas_mov > 0
+    ON CONFLICT (solicitud_id) DO UPDATE
+        SET horas = EXCLUDED.horas, fecha_horas = EXCLUDED.fecha_horas, descripcion = EXCLUDED.descripcion
+        WHERE hour_movements.origen = 'IMPORTACION'
+          AND hour_movements.enrollment_id = EXCLUDED.enrollment_id
+          AND hour_movements.horas IS DISTINCT FROM EXCLUDED.horas
+    RETURNING horas
+)
+SELECT count(*)::int AS n, coalesce(sum(horas), 0)::int AS horas FROM up;
+
 -- @step carreras_de_proyecto
 WITH ins AS (
     INSERT INTO project_careers (project_id, career_id)
     SELECT DISTINCT n.project_id, t.career_id
     FROM t_enr_c t
     JOIN students s     ON s.carnet = t.carnet
-    JOIN institutions i ON i.codigo_css = t.cod_institucion
-    JOIN projects p     ON p.institution_id = i.id AND p.correlativo_css = t.correlativo
+    JOIN institutions i ON fn_import_numero(i.codigo_css) = t.cod_institucion
+    JOIN projects p     ON p.institution_id = i.id AND fn_import_numero(p.correlativo_css) = t.correlativo
     JOIN t_enr_nuevas n ON n.student_id = s.id AND n.project_id = p.id
     ON CONFLICT DO NOTHING
     RETURNING 1
@@ -140,8 +205,8 @@ WITH ins AS (
            'IMPORTACION'
     FROM t_enr_c t
     JOIN students s     ON s.carnet = t.carnet
-    JOIN institutions i ON i.codigo_css = t.cod_institucion
-    JOIN projects p     ON p.institution_id = i.id AND p.correlativo_css = t.correlativo
+    JOIN institutions i ON fn_import_numero(i.codigo_css) = t.cod_institucion
+    JOIN projects p     ON p.institution_id = i.id AND fn_import_numero(p.correlativo_css) = t.correlativo
     JOIN t_enr_nuevas n ON n.student_id = s.id AND n.project_id = p.id
     WHERE t.horas > 0                                  -- 0 horas no genera movimiento
     ON CONFLICT DO NOTHING
@@ -156,7 +221,7 @@ SELECT s.finalizados AS n, s.fechas_completadas
 FROM fn_sincronizar_estado_proyectos(
     ARRAY(SELECT p.id
           FROM t_proj_c t
-          JOIN institutions i ON i.codigo_css = t.codigo_css
-          JOIN projects p     ON p.institution_id = i.id AND p.correlativo_css = t.correlativo),
+          JOIN institutions i ON fn_import_numero(i.codigo_css) = t.codigo_css
+          JOIN projects p     ON p.institution_id = i.id AND fn_import_numero(p.correlativo_css) = t.correlativo),
     true
 ) s;

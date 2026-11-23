@@ -14,6 +14,7 @@ import {
 import {
   ENROLLMENT_ACTIVE_SQL,
   ENROLLMENT_COUNTED_SQL,
+  ENROLLMENT_PARTICIPATION_SQL,
   institutionTipoFromUI,
   institutionTipoToUI,
   projectStatusSql,
@@ -137,8 +138,9 @@ async function listProjects(institutionId: string, t?: Transaction): Promise<Ins
             COALESCE(p.ubicacion, '') AS ubicacion,
             to_char(p.fecha_inicio, 'YYYY-MM-DD') AS "fechaInicio",
             to_char(p.fecha_cierre, 'YYYY-MM-DD') AS "fechaCierre",
+            -- Participaciones del proyecto (incluye abandonadas, como el reporte del CSS).
             (SELECT count(*) FROM project_enrollments pe
-              WHERE pe.project_id = p.id AND pe.estado IN ${ENROLLMENT_COUNTED_SQL})::int AS estudiantes
+              WHERE pe.project_id = p.id AND pe.estado IN ${ENROLLMENT_PARTICIPATION_SQL})::int AS estudiantes
      FROM projects p JOIN institutions i ON i.id = p.institution_id
      WHERE p.institution_id = :institutionId
      ORDER BY p.fecha_inicio DESC NULLS LAST, p.titulo`,
@@ -187,6 +189,34 @@ async function assertNombreDisponible(nombre: string, exceptId: string | null, t
   if (dup) throw AppError.conflict('Ya existe una institución con ese nombre', { institutionId: dup.id });
 }
 
+/**
+ * Aviso (409 INSTITUCION_SIMILAR) si otra institución tiene un nombre EQUIVALENTE
+ * (nombre_clave: difiere solo en tildes, puntuación, espacios o mayúsculas), p. ej.
+ * "FISCALIA GENERAL DE LA REPUBLICA." frente a "Fiscalía General de la República".
+ * `confirmar` = el usuario ya vio la lista y decidió crear/renombrar igual.
+ */
+export async function assertSinInstitucionSimilar(
+  nombre: string, exceptId: string | null, confirmar: boolean | undefined, t: Transaction,
+): Promise<void> {
+  if (confirmar) return;
+  const similares = await selectAll<{ id: string; nombre: string; codigoCss: string | null }>(
+    `SELECT id, nombre, codigo_css AS "codigoCss" FROM institutions
+     WHERE nombre_clave = fn_nombre_clave(:nombre)
+       AND nombre_normalizado <> fn_normalize_text(:nombre)
+       AND (CAST(:exceptId AS uuid) IS NULL OR id <> CAST(:exceptId AS uuid))
+     ORDER BY nombre`,
+    { nombre, exceptId },
+    t,
+  );
+  if (similares.length > 0) {
+    throw AppError.conflict('Ya existe una institución con un nombre equivalente', {
+      code: 'INSTITUCION_SIMILAR',
+      similares,
+      puedeConfirmar: true,
+    });
+  }
+}
+
 export const institutionsService = {
   async list(query: ListInstitutionsQuery): Promise<InstitutionListDTO[]> {
     const tipo = query.type && query.type !== 'Todos' ? institutionTipoFromUI(query.type) : null;
@@ -221,6 +251,7 @@ export const institutionsService = {
   async create(input: CreateInstitutionInput): Promise<InstitutionDetailDTO> {
     return withTransaction(async (t) => {
       await assertNombreDisponible(input.nombre, null, t);
+      await assertSinInstitucionSimilar(input.nombre, null, input.confirmarSimilar, t);
       const id = await insertInstitution(toColumns(input), t);
       return institutionsService.getById(id, t);
     });
@@ -228,8 +259,12 @@ export const institutionsService = {
 
   async update(id: string, input: UpdateInstitutionInput): Promise<InstitutionDetailDTO> {
     return withTransaction(async (t) => {
-      await findRow(id, t);
-      if (input.nombre !== undefined) await assertNombreDisponible(input.nombre, id, t);
+      const row = await findRow(id, t);
+      if (input.nombre !== undefined) {
+        await assertNombreDisponible(input.nombre, id, t);
+        // Solo si el nombre cambia: editar otros datos no vuelve a avisar por parecidas ya aceptadas.
+        if (input.nombre.trim() !== row.nombre) await assertSinInstitucionSimilar(input.nombre, id, input.confirmarSimilar, t);
+      }
       const columns = toColumns(input);
       const names = Object.keys(columns);
       if (names.length > 0) {
@@ -268,6 +303,8 @@ export const institutionsService = {
       ubicacion?: string | null;
       descripcion?: string | null;
       image?: string | null;
+      /** Ver assertSinInstitucionSimilar. */
+      confirmarSimilar?: boolean;
     },
     t: Transaction,
   ): Promise<string> {
@@ -295,6 +332,7 @@ export const institutionsService = {
     if (input.institutionId) {
       const row = await findRow(input.institutionId, t);
       const rename = input.nombre && input.nombre.trim() !== row.nombre ? { nombre: input.nombre.trim() } : {};
+      if (rename.nombre) await assertSinInstitucionSimilar(rename.nombre, input.institutionId, input.confirmarSimilar, t);
       return applyPatch(input.institutionId, rename);
     }
     if (!input.nombre) throw AppError.badRequest('Indique institutionId o institutionName');
@@ -304,6 +342,8 @@ export const institutionsService = {
       t,
     );
     if (existing) return applyPatch(existing.id);
+    // Institución nueva: avisar si ya hay una con nombre equivalente (evita duplicarla).
+    await assertSinInstitucionSimilar(input.nombre, null, input.confirmarSimilar, t);
     return insertInstitution(
       toColumns({
         nombre: input.nombre,

@@ -7,7 +7,9 @@
  *   decide      ACEPTAR_REPORTE / CONSERVAR_BD en una participación que lo admite
  *               (aumento de horas en una participación ya FINALIZADA)
  *   linkProject VINCULAR a un proyecto creado en la app con la misma nombre_clave, o
- *               CREAR_NUEVO (migración 014): evita copias silenciosas del mismo proyecto
+ *               CREAR_NUEVO (migración 014): evita copias silenciosas del mismo proyecto.
+ *               ALIAS (migración 016): el correlativo del lote es alterno de un proyecto
+ *               del reporte CSS con el mismo título en la institución.
  *   renew       renueva el vencimiento de la vista previa (24 h)
  *   log         bitácora de la revisión
  *
@@ -55,7 +57,7 @@ export interface CambiosFila {
 }
 
 export type DecisionParticipacion = 'ACEPTAR_REPORTE' | 'CONSERVAR_BD';
-export type DecisionProyecto = 'VINCULAR' | 'CREAR_NUEVO';
+export type DecisionProyecto = 'VINCULAR' | 'ALIAS' | 'CREAR_NUEVO';
 
 interface FilaPdf {
   id: string;
@@ -318,10 +320,12 @@ export const importReviewService = {
   },
 
   /**
-   * Proyecto del lote que coincide (nombre_clave) con proyectos creados en la app.
-   * VINCULAR: se adopta `projectId` (debe ser una de las candidatas); CREAR_NUEVO: se crea
-   * aparte, a sabiendas. La clasificación vuelve a validar todo (p. ej. que dos
-   * correlativos no adopten el mismo proyecto).
+   * Proyecto del lote que coincide (nombre_clave) con proyectos creados en la app o con
+   * proyectos del reporte CSS de la misma institución.
+   * VINCULAR: se adopta `projectId` (una de las candidatas de la app); ALIAS: el correlativo
+   * del lote es alterno de `projectId` (uno de los candidatos del reporte; el alias se
+   * registra al confirmar); CREAR_NUEVO: se crea aparte, a sabiendas. La clasificación
+   * vuelve a validar todo (p. ej. que dos correlativos no adopten el mismo proyecto).
    */
   async linkProject(
     batchId: string,
@@ -336,15 +340,23 @@ export const importReviewService = {
       );
       if (!item) throw AppError.notFound('El proyecto no está en este lote');
       const candidatos = (item.datos.candidatosApp as Array<{ id: string; titulo: string }> | null) ?? [];
-      if (candidatos.length === 0) {
-        throw AppError.unprocessable('Este proyecto no coincide con ningún proyecto creado en la app: no hay nada que vincular.');
+      const candidatosReporte = (item.datos.candidatosReporte as Array<{ id: string; titulo: string }> | null) ?? [];
+      if (candidatos.length === 0 && candidatosReporte.length === 0) {
+        throw AppError.unprocessable(
+          'Este proyecto no coincide con ningún proyecto de la app ni del reporte CSS: no hay nada que vincular.',
+        );
       }
       if (input.decision === 'VINCULAR' && !candidatos.some((c) => c.id === input.projectId)) {
         throw AppError.unprocessable('El proyecto elegido no es una de las coincidencias de la app', {
           candidatos: candidatos.map((c) => c.id),
         });
       }
-      const projectId = input.decision === 'VINCULAR' ? input.projectId! : null;
+      if (input.decision === 'ALIAS' && !candidatosReporte.some((c) => c.id === input.projectId)) {
+        throw AppError.unprocessable('El proyecto elegido no es uno de los proyectos del reporte CSS con el mismo título', {
+          candidatos: candidatosReporte.map((c) => c.id),
+        });
+      }
+      const projectId = input.decision === 'CREAR_NUEVO' ? null : input.projectId!;
       const anterior = await selectOne<Record<string, unknown>>(
         `SELECT decision, project_id AS "projectId" FROM import_project_links WHERE batch_id = :batchId AND clave = :clave`,
         { batchId, clave: input.clave },
@@ -359,7 +371,7 @@ export const importReviewService = {
         { replacements: { batchId, clave: input.clave, decision: input.decision, projectId, justificacion: input.justificacion }, transaction: t },
       );
       await registrar(t, {
-        batchId, accion: 'VINCULAR', clave: input.clave, original: { candidatos }, anterior,
+        batchId, accion: 'VINCULAR', clave: input.clave, original: { candidatos, candidatosReporte }, anterior,
         nuevo: { decision: input.decision, projectId }, justificacion: input.justificacion,
       });
     });

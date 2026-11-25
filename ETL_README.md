@@ -18,6 +18,16 @@ Esta guía describe la **carga inicial en una base de producción vacía**.
 
 ---
 
+## 0. ⚠ Solo para la carga inicial
+
+**No ejecute el ETL sobre una base ya inicializada, con importaciones hechas desde la app o con proyectos fusionados.**
+
+- El ETL usa como llave `(institución, correlativo)` y no conoce los **correlativos alternos** (`project_correlativo_alias`, migración 016) ni las decisiones de la revisión de importaciones. Sobre una base donde se fusionaron proyectos (p. ej. `scripts/fusionar-proyectos-pdf-grupo1.sql`) volvería a crear las copias que se fusionaron.
+- `pnpm etl:transform` (también con `--dry-run`) **se detiene** si la base tiene correlativos alternos, y si tiene importaciones confirmadas desde la app, salvo `--forzar-base-con-importaciones` (solo en una copia de desarrollo, nunca en producción). Además, la base rechaza crear un proyecto sobre una llave que ya es alias (`trg_projects_sin_alias`), así que una ejecución forzada falla y se revierte en lugar de duplicar.
+- Una vez cargada la base, los reportes nuevos (PDF de horas y Excel CSS) se cargan con el **módulo de importación** de la app, que resuelve los correlativos alternos y deja los casos dudosos en conflicto para revisión.
+
+---
+
 ## 1. Requisitos
 
 | Requisito | Detalle |
@@ -166,11 +176,13 @@ Todo lo que inserta el ETL queda en `auditoria` con `actor = 'etl:css-historico'
 - Los estudiantes que ya completaron su perfil en la app (`nombres` no nulo) **no** se sobrescriben.
 - El estado de un proyecto depende de la fecha de ejecución. Si se reejecuta después de la fecha de cierre de un proyecto, ese proyecto pasa a `FINALIZADO`.
 - Para reejecutar después de `etl:staging:drop`, empiece de nuevo en el paso 2 (`etl:staging:init`).
+- La reejecución solo aplica **antes** de empezar a usar la app sobre esa base (ver sección 0): con importaciones confirmadas o proyectos fusionados, el ETL se niega a correr.
 
 ## 7. Problemas frecuentes
 
 | Mensaje | Causa y solución |
 |---|---|
+| `La base tiene N correlativo(s) alterno(s)…` / `La base ya tiene N importación(es) confirmada(s)…` | La base ya no es una carga inicial (sección 0). Use el módulo de importación de la app. |
 | `Formato inesperado: … la columna "X" no está donde se esperaba` | El reporte cambió de formato. Hay que ajustar `COLUMNS` (PDF) o `HEADER`/`DATA_COLUMNS` (Excel) en `src/etl/extract/`. |
 | `El esquema "staging" no existe` | Falta `pnpm etl:staging:init`. |
 | `Falta la migración 002…` / `Carreras del mapa que no existen en el catálogo oficial` | Falta `pnpm db:migrate`, o se agregó una carrera al mapa que no está en la migración 003. |

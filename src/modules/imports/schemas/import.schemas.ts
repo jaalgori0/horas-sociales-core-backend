@@ -80,12 +80,16 @@ export const projectLinkBodySchema = z
     justificacion,
     /** import_items.clave del proyecto: codigo/correlativo */
     clave: z.string().min(3),
-    decision: z.enum(['VINCULAR', 'CREAR_NUEVO']),
+    /**
+     * VINCULAR: adopta un proyecto de la app sin correlativo. ALIAS (migración 016): el
+     * correlativo del lote es alterno de un proyecto del reporte CSS. CREAR_NUEVO: otro proyecto.
+     */
+    decision: z.enum(['VINCULAR', 'ALIAS', 'CREAR_NUEVO']),
     projectId: z.string().uuid('projectId debe ser un UUID').optional(),
   })
   .strict()
-  .refine((b) => (b.decision === 'VINCULAR') === (b.projectId !== undefined), {
-    message: 'VINCULAR exige projectId; CREAR_NUEVO no lo lleva',
+  .refine((b) => (b.decision !== 'CREAR_NUEVO') === (b.projectId !== undefined), {
+    message: 'VINCULAR y ALIAS exigen projectId; CREAR_NUEVO no lo lleva',
     path: ['projectId'],
   });
 

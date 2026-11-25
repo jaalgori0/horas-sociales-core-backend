@@ -4,6 +4,14 @@
  *   pnpm etl:transform            → valida, carga y confirma (COMMIT)
  *   pnpm etl:transform --dry-run  → ejecuta todo y muestra el informe, pero REVIERTE
  *
+ * SOLO PARA LA CARGA INICIAL en una base vacía (ver ETL_README.md, sección 0). Se niega a
+ * correr sobre una base ya inicializada por la app:
+ *   • con correlativos alternos (project_correlativo_alias, migración 016: proyectos ya
+ *     fusionados) → siempre se detiene: recrearía los proyectos fusionados;
+ *   • con importaciones confirmadas desde la app → se detiene salvo
+ *     --forzar-base-con-importaciones (solo para pruebas en una copia de desarrollo).
+ * Las cargas posteriores se hacen con el módulo de importación de la app.
+ *
  * Todo corre en UNA transacción: o se carga completo o no se carga nada.
  * Las filas que no pasan validación quedan en staging.rechazos (no bloquean al resto).
  * Código de salida 2 si hubo rechazos o descuadres: revíselos antes de dar por buena la carga.
@@ -20,6 +28,34 @@ class DryRunRollback extends Error {}
 
 async function select<T extends object>(sql: string, transaction: Transaction): Promise<T[]> {
   return sequelize.query<T>(sql, { type: QueryTypes.SELECT, transaction });
+}
+
+/**
+ * El ETL es para la carga inicial: en una base ya trabajada desde la app volvería a crear
+ * proyectos fusionados y no conoce los correlativos alternos ni las decisiones de revisión.
+ */
+async function assertBaseNoInicializada(transaction: Transaction, forzar: boolean): Promise<void> {
+  const [estado] = await select<{ alias: number | null; lotes: number }>(
+    `SELECT (CASE WHEN to_regclass('public.project_correlativo_alias') IS NULL THEN 0
+                  ELSE (SELECT count(*) FROM project_correlativo_alias) END)::int AS alias,
+            (CASE WHEN to_regclass('public.import_batches') IS NULL THEN 0
+                  ELSE (SELECT count(*) FROM import_batches WHERE estado = 'CONFIRMADO') END)::int AS lotes`,
+    transaction,
+  );
+  if ((estado?.alias ?? 0) > 0) {
+    throw new EtlError(
+      `La base tiene ${estado!.alias} correlativo(s) alterno(s) (proyectos ya fusionados, migración 016). ` +
+        'El ETL histórico es solo para la carga inicial en una base vacía y los volvería a crear. ' +
+        'Para cargar reportes nuevos use el módulo de importación de la app.',
+    );
+  }
+  if ((estado?.lotes ?? 0) > 0 && !forzar) {
+    throw new EtlError(
+      `La base ya tiene ${estado!.lotes} importación(es) confirmada(s) desde la app. ` +
+        'El ETL histórico es solo para la carga inicial en una base vacía; para cargar reportes nuevos use ' +
+        'el módulo de importación. (Solo en una copia de desarrollo: --forzar-base-con-importaciones.)',
+    );
+  }
 }
 
 async function assertPrerequisites(transaction: Transaction): Promise<void> {
@@ -143,11 +179,13 @@ async function report(transaction: Transaction): Promise<number> {
 
 async function main(): Promise<void> {
   const dryRun = process.argv.includes('--dry-run');
+  const forzar = process.argv.includes('--forzar-base-con-importaciones');
   const sql = await readFile(SQL_FILE, 'utf8');
   let problems = 0;
 
   try {
     await sequelize.transaction(async (transaction) => {
+      await assertBaseNoInicializada(transaction, forzar);
       await assertPrerequisites(transaction);
       const started = Date.now();
       await sequelize.query(sql, { transaction });

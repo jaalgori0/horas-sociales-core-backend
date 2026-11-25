@@ -17,7 +17,7 @@
  *   POST   /:id/filas/:rowId/excluir    excluye la fila del lote
  *   POST   /:id/filas/:rowId/restaurar  devuelve la fila al lote
  *   POST   /:id/decisiones              { clave, decision: ACEPTAR_REPORTE | CONSERVAR_BD }
- *   POST   /:id/proyectos/vincular      { clave, decision: VINCULAR (+ projectId) | CREAR_NUEVO }
+ *   POST   /:id/proyectos/vincular      { clave, decision: VINCULAR | ALIAS (+ projectId) | CREAR_NUEVO }
  *   POST   /:id/renovar                 24 h más de vigencia
  *   GET    /:id/revision                bitácora (original, anterior, nuevo, quién, cuándo)
  *

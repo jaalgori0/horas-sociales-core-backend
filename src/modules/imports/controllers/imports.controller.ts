@@ -78,7 +78,7 @@ export const importsController = {
     const { id } = importIdParamsSchema.parse(req.params);
     res.json(await importReviewService.decide(id, decisionBodySchema.parse(req.body), actorOf(req.user)));
   },
-  /** POST /:id/proyectos/vincular — VINCULAR a un proyecto de la app o CREAR_NUEVO. */
+  /** POST /:id/proyectos/vincular — VINCULAR (app), ALIAS (reporte CSS) o CREAR_NUEVO. */
   async linkProject(req: Request, res: Response): Promise<void> {
     const { id } = importIdParamsSchema.parse(req.params);
     res.json(await importReviewService.linkProject(id, projectLinkBodySchema.parse(req.body), actorOf(req.user)));

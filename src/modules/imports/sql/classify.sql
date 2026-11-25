@@ -423,6 +423,14 @@ CROSS JOIN LATERAL (
 --     CREAR_NUEVO (import_project_links);
 --   • dos correlativos no pueden adoptar el mismo proyecto de la app (CONFLICTO);
 --   • un proyecto NUEVO parecido a uno ya importado con otro correlativo se crea con aviso.
+-- Correlativos alternos (migración 016, project_correlativo_alias). Un mismo correlativo no
+-- significa lo mismo en todas las instituciones ni reportes: la equivalencia nunca se deduce.
+--   • (institución, correlativo) registrado como alias y el título del lote es el mismo
+--     (nombre_clave) que el del proyecto destino → se usa ese proyecto (ALIAS);
+--   • alias registrado pero el título difiere → CONFLICTO (no se mezcla ni se crea);
+--   • correlativo nuevo, solo en los PDF (sin fila del Excel), cuyo título coincide con
+--     un proyecto del reporte CSS de la misma institución → CONFLICTO hasta que la revisión
+--     decida ALIAS (se registra el alias al confirmar) o CREAR_NUEVO (import_project_links).
 CREATE TEMP TABLE t_proj_c ON COMMIT DROP AS
 WITH lote AS (
     SELECT *, count(*) OVER (PARTITION BY codigo_css, fn_nombre_clave(titulo)) AS mismo_titulo FROM t_proj
@@ -433,7 +441,9 @@ cand AS (
            p.id AS p_id,
            coalesce(app.n, 0) AS app_n, app.ids AS app_ids, app.lista AS app_lista,
            imp.lista AS similares_importados, imp.correlativos AS similares_correlativos,
-           l.decision AS link_decision, l.project_id AS link_project_id
+           l.decision AS link_decision, l.project_id AS link_project_id,
+           al.id AS alias_id, al.project_id AS alias_project_id, alp.nombre_clave AS alias_clave,
+           coalesce(rep.n, 0) AS rep_n, rep.ids AS rep_ids, rep.lista AS rep_lista
     FROM lote t
     JOIN t_inst_c ic ON ic.codigo_css = t.codigo_css
     LEFT JOIN projects p ON p.institution_id = ic.institution_id AND fn_import_numero(p.correlativo_css) = t.correlativo
@@ -456,6 +466,22 @@ cand AS (
           AND o.institution_id = ic.institution_id AND o.correlativo_css IS NOT NULL
           AND o.nombre_clave = fn_nombre_clave(t.titulo)
     ) imp ON true
+    LEFT JOIN project_correlativo_alias al
+           ON p.id IS NULL AND al.institution_id = ic.institution_id AND al.correlativo_css = t.correlativo
+    LEFT JOIN projects alp ON alp.id = al.project_id
+    -- Proyectos del reporte CSS con el mismo título en la institución (solo para filas que
+    -- vienen únicamente de los PDF: una fila del Excel ES el proyecto oficial).
+    LEFT JOIN LATERAL (
+        SELECT count(*) AS n,
+               array_agg(o.id ORDER BY o.correlativo_css) AS ids,
+               jsonb_agg(jsonb_build_object('id', o.id, 'titulo', o.titulo, 'correlativo', o.correlativo_css,
+                                            'estado', o.estado) ORDER BY o.correlativo_css) AS lista
+        FROM projects o
+        WHERE p.id IS NULL AND al.id IS NULL AND ic.institution_id IS NOT NULL
+          AND cardinality(t.xls_ids) = 0
+          AND o.institution_id = ic.institution_id AND o.en_reporte_css AND o.correlativo_css IS NOT NULL
+          AND NOT (o.atributos ? 'sistema') AND o.nombre_clave = fn_nombre_clave(t.titulo)
+    ) rep ON true
     LEFT JOIN import_project_links l
            ON l.batch_id = fn_import_actual() AND l.clave = t.codigo_css || '/' || t.correlativo
 ),
@@ -463,9 +489,13 @@ dec AS (
     SELECT c.*,
            CASE
                WHEN c.p_id IS NOT NULL THEN 'EXISTE'
-               WHEN c.app_n = 0 THEN 'NUEVO'
+               WHEN c.alias_id IS NOT NULL AND c.alias_clave = fn_nombre_clave(c.titulo) THEN 'ALIAS'
+               WHEN c.alias_id IS NOT NULL THEN 'ALIAS_TITULO_DIFIERE'
+               WHEN c.rep_n > 0 AND c.link_decision = 'ALIAS' AND c.link_project_id = ANY (c.rep_ids) THEN 'ALIAS_NUEVO'
+               WHEN c.app_n = 0 AND c.rep_n = 0 THEN 'NUEVO'
                WHEN c.link_decision = 'VINCULAR' AND c.link_project_id = ANY (c.app_ids) THEN 'VINCULA'
                WHEN c.link_decision = 'CREAR_NUEVO' THEN 'NUEVO_CONFIRMADO'
+               WHEN c.app_n = 0 THEN 'REQUIERE_ALIAS'
                WHEN c.app_n = 1 AND c.mismo_titulo = 1 THEN 'ADOPTA'
                ELSE 'REQUIERE_VINCULO'
            END AS resolucion
@@ -473,7 +503,9 @@ dec AS (
 ),
 dec2 AS (
     SELECT d.*,
-           CASE d.resolucion WHEN 'ADOPTA' THEN d.app_ids[1] WHEN 'VINCULA' THEN d.link_project_id END AS a_id
+           CASE d.resolucion WHEN 'ADOPTA' THEN d.app_ids[1] WHEN 'VINCULA' THEN d.link_project_id END AS a_id,
+           -- Correlativo alterno: varios correlativos pueden ser alias del mismo proyecto.
+           CASE d.resolucion WHEN 'ALIAS' THEN d.alias_project_id WHEN 'ALIAS_NUEVO' THEN d.link_project_id END AS alias_destino
     FROM dec d
 ),
 dec3 AS (
@@ -483,15 +515,16 @@ dec3 AS (
 ),
 base AS (
     SELECT d.*,
-           CASE WHEN d.adopciones > 1 THEN NULL ELSE coalesce(d.p_id, d.a_id) END AS project_id,
+           CASE WHEN d.adopciones > 1 THEN NULL ELSE coalesce(d.p_id, d.alias_destino, d.a_id) END AS project_id,
            d.a_id IS NOT NULL AND d.adopciones = 1  AS adoptado,
            e.titulo        AS e_titulo,
            e.fecha_inicio  AS e_inicio,
            e.fecha_cierre  AS e_cierre,
            e.atributos     AS e_atributos,
-           e.estado        AS e_estado
+           e.estado        AS e_estado,
+           e.correlativo_css AS e_corr
     FROM dec3 d
-    LEFT JOIN projects e ON e.id = CASE WHEN d.adopciones > 1 THEN NULL ELSE coalesce(d.p_id, d.a_id) END
+    LEFT JOIN projects e ON e.id = CASE WHEN d.adopciones > 1 THEN NULL ELSE coalesce(d.p_id, d.alias_destino, d.a_id) END
 ),
 fill AS (
     SELECT b.*,
@@ -514,7 +547,8 @@ fill2 AS (
 )
 SELECT f.codigo_css, f.correlativo, f.titulo, f.fecha_inicio, f.fecha_cierre, f.area, f.alumnos,
        f.pdf_ids, f.xls_ids, f.institution_id, f.project_id,
-       f.resolucion, f.app_lista, f.similares_importados, f.link_decision, f.link_project_id, k.*
+       f.resolucion, f.app_lista, f.similares_importados, f.link_decision, f.link_project_id,
+       f.rep_lista, f.e_corr, k.*
 FROM fill2 f
 CROSS JOIN LATERAL (
     SELECT
@@ -533,6 +567,9 @@ CROSS JOIN LATERAL (
             CASE WHEN f.adoptado AND fn_normalize_text(f.e_titulo) <> fn_normalize_text(f.titulo)
                  THEN 'titulo_similar_no_identico' END,
             CASE WHEN f.resolucion = 'REQUIERE_VINCULO' THEN 'requiere_vincular_proyecto_app' END,
+            CASE WHEN f.resolucion = 'REQUIERE_ALIAS' THEN 'requiere_decidir_correlativo_alterno' END,
+            CASE WHEN f.resolucion = 'ALIAS_TITULO_DIFIERE' THEN 'correlativo_alterno_titulo_difiere' END,
+            CASE WHEN f.resolucion = 'ALIAS_NUEVO' THEN 'se_registra_correlativo_alterno_de:' || f.e_corr END,
             CASE WHEN f.adopciones > 1 THEN 'vinculo_repetido' END,
             CASE WHEN f.resolucion = 'VINCULA' AND f.adoptado THEN 'vinculado_en_revision' END,
             CASE WHEN f.resolucion = 'NUEVO_CONFIRMADO' THEN 'se_crea_aunque_existe_en_app' END,
@@ -551,7 +588,7 @@ CROSS JOIN LATERAL (
                  THEN 'fecha_fin_ajustada:' || f.fin_original END
         ], NULL) AS motivos,
         CASE WHEN f.project_id IS NOT NULL THEN jsonb_build_object(
-            'id', f.project_id, 'titulo', f.e_titulo, 'estado', f.e_estado,
+            'id', f.project_id, 'titulo', f.e_titulo, 'estado', f.e_estado, 'correlativo', f.e_corr,
             'fechaInicio', f.e_inicio, 'fechaCierre', f.e_cierre, 'areaCss', f.e_atributos ->> 'area_css',
             'alumnosCss', (f.e_atributos ->> 'alumnos_css')::integer)
         END AS existente
@@ -560,13 +597,15 @@ CROSS JOIN LATERAL (
 ALTER TABLE t_proj_c ADD COLUMN estado text, ADD COLUMN accion text;
 UPDATE t_proj_c SET
     estado = CASE
-        WHEN motivos && ARRAY['institucion_en_conflicto', 'requiere_vincular_proyecto_app', 'vinculo_repetido'] THEN 'CONFLICTO'
+        WHEN motivos && ARRAY['institucion_en_conflicto', 'requiere_vincular_proyecto_app', 'vinculo_repetido',
+                              'requiere_decidir_correlativo_alterno', 'correlativo_alterno_titulo_difiere'] THEN 'CONFLICTO'
         WHEN project_id IS NULL THEN CASE WHEN cardinality(motivos) > 0 THEN 'ADVERTENCIA' ELSE 'NUEVO' END
         WHEN completar IS NOT NULL OR cardinality(motivos) > 0 THEN 'ADVERTENCIA'
         ELSE 'IGNORADO'
     END,
     accion = CASE
-        WHEN motivos && ARRAY['institucion_en_conflicto', 'requiere_vincular_proyecto_app', 'vinculo_repetido'] THEN 'NINGUNA'
+        WHEN motivos && ARRAY['institucion_en_conflicto', 'requiere_vincular_proyecto_app', 'vinculo_repetido',
+                              'requiere_decidir_correlativo_alterno', 'correlativo_alterno_titulo_difiere'] THEN 'NINGUNA'
         WHEN project_id IS NULL THEN 'INSERTAR'
         WHEN completar IS NOT NULL THEN 'COMPLETAR'
         ELSE 'NINGUNA'
@@ -651,7 +690,9 @@ cmp AS (
            b.enrollment_id IS NOT NULL AND b.e_horas <> b.horas                      AS d_horas,
            b.enrollment_id IS NOT NULL AND b.e_estado <> b.estado                    AS d_estado,
            b.enrollment_id IS NOT NULL AND b.e_asignada <> b.asignada_en             AS d_inicio,
-           b.enrollment_id IS NOT NULL AND b.e_cerrada IS DISTINCT FROM b.cerrada_en AS d_fin
+           b.enrollment_id IS NOT NULL AND b.e_cerrada IS DISTINCT FROM b.cerrada_en AS d_fin,
+           -- Con correlativos alternos, dos filas del lote pueden caer en el mismo proyecto.
+           CASE WHEN b.project_id IS NOT NULL THEN count(*) OVER (PARTITION BY b.carnet, b.project_id) ELSE 1 END AS repetidas
     FROM base b
 ),
 tipo AS (
@@ -679,6 +720,7 @@ CROSS JOIN LATERAL (
         array_remove(ARRAY[
             CASE WHEN t.proj_estado = 'CONFLICTO' THEN 'proyecto_en_conflicto' END,
             CASE WHEN t.stud_estado = 'CONFLICTO' THEN 'estudiante_en_conflicto' END,
+            CASE WHEN t.repetidas > 1 THEN 'participacion_repetida_por_correlativo_alterno' END,
             CASE WHEN t.cambio = 'BLOQUEO' AND t.d_estado AND t.e_estado IN ('FINALIZADA', 'RETIRADA', 'CANCELADA')
                  THEN 'retroceso_de_estado' END,
             CASE WHEN t.cambio = 'BLOQUEO' AND t.horas < t.e_horas THEN 'horas_disminuyen' END,
@@ -745,6 +787,11 @@ SELECT fn_import_actual(), 'PROYECTO', codigo_css || '/' || correlativo, estado,
                           -- importados parecidos con otro correlativo y la decisión vigente.
                           'resolucion', resolucion, 'candidatosApp', app_lista,
                           'similaresImportados', similares_importados,
+                          -- Proyectos del reporte CSS con el mismo título (para decidir ALIAS) y,
+                          -- si se usa un correlativo alterno, el proyecto oficial al que apunta.
+                          'candidatosReporte', rep_lista,
+                          'correlativoAlterno', CASE WHEN resolucion IN ('ALIAS', 'ALIAS_NUEVO')
+                                                     THEN jsonb_build_object('projectId', project_id, 'correlativo', e_corr) END,
                           'vinculo', CASE WHEN link_decision IS NOT NULL
                                           THEN jsonb_build_object('decision', link_decision, 'projectId', link_project_id) END),
        existente, completar, project_id, pdf_ids, xls_ids

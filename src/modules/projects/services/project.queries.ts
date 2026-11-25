@@ -46,6 +46,8 @@ export interface ProjectRow {
   correlativo_css: string | null;
   naturaleza: string;
   clasificaciones: ProjectClasificacion[];
+  en_reporte_css: boolean;
+  es_sistema: boolean;
   institution_id: string;
   institution: string;
   institution_tipo: string | null;
@@ -160,6 +162,13 @@ export interface ProjectListDTO {
   clasificaciones: ProjectClasificacion[];
   /** Naturaleza con la que se registran las horas (derivada de las clasificaciones). */
   naturaleza: string;
+  /**
+   * Origen (migración 015): true = viene en el Excel CSS «Memoria de Labores» (reporte
+   * oficial); false = solo aparece en los reportes de horas (PDF) o se creó en la app.
+   */
+  enReporteCss: boolean;
+  /** Proyecto interno del sistema (asignaciones manuales / convalidaciones). */
+  esSistema: boolean;
 }
 
 export interface ProjectDetailDTO extends ProjectListDTO {
@@ -189,6 +198,10 @@ export interface ProjectMapDTO {
   municipio: string | null;
   /** `departamento` es uno de los 14 departamentos (tiene marcador en el mapa). */
   enMapa: boolean;
+  /** Ver ProjectListDTO.enReporteCss. */
+  enReporteCss: boolean;
+  /** Ver ProjectListDTO.esSistema. */
+  esSistema: boolean;
 }
 
 // ─── SQL base ────────────────────────────────────────────────────────────────
@@ -199,6 +212,7 @@ const PROJECT_BASE_SQL = `
          to_char(p.fecha_cierre, 'YYYY-MM-DD') AS fecha_cierre,
          p.cupos, p.personas_beneficiadas, p.image_url,
          p.atributos ->> 'area_css' AS area_css, p.correlativo_css, p.naturaleza, p.fecha_inicio AS orden_fecha,
+         p.en_reporte_css, (p.atributos ? 'sistema') AS es_sistema,
          i.id AS institution_id, i.nombre AS institution, i.tipo AS institution_tipo,
          i.descripcion AS institution_descripcion, i.image_url AS institution_image,
          fac.id AS faculty_id, fac.nombre AS faculty_nombre, (p.faculty_id IS NULL) AS faculty_derivada,
@@ -378,6 +392,8 @@ export function toListDTO(row: ProjectRow): ProjectListDTO {
     correlativoCss: row.correlativo_css,
     clasificaciones: row.clasificaciones,
     naturaleza: row.naturaleza,
+    enReporteCss: row.en_reporte_css,
+    esSistema: row.es_sistema,
   };
 }
 
@@ -406,5 +422,7 @@ export function toMapDTO(row: ProjectRow): ProjectMapDTO {
     departamento: lugar.departamento,
     municipio: lugar.municipioConocido ? lugar.municipio : null,
     enMapa: lugar.departamentoReconocido,
+    enReporteCss: row.en_reporte_css,
+    esSistema: row.es_sistema,
   };
 }

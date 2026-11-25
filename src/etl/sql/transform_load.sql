@@ -382,7 +382,8 @@ SELECT
     CASE WHEN x.id IS NOT NULL THEN x.fecha_inicio ELSE p.inicio_estudiantes END AS fecha_inicio,
     CASE WHEN x.id IS NOT NULL THEN x.fecha_fin    ELSE p.cierre_estudiantes END AS fecha_cierre,
     x.area,
-    x.alumnos                                       -- alumnos según el Excel (conciliación vs. su total)
+    x.alumnos,                                      -- alumnos según el Excel (conciliación vs. su total)
+    x.id IS NOT NULL                                AS en_reporte_css   -- viene en el Excel (migración 015)
 FROM pdf p
 FULL JOIN staging.v_xls_ok x
        ON x.cod_institucion = p.cod_institucion AND x.correlativo = p.correlativo;
@@ -419,7 +420,7 @@ ON CONFLICT (clave) DO NOTHING;
 
 -- 5.4 Proyectos. Llave natural: (institution_id, correlativo_css).
 INSERT INTO projects (institution_id, correlativo_css, titulo, descripcion, naturaleza, estado,
-                      fecha_inicio, fecha_cierre, atributos)
+                      fecha_inicio, fecha_cierre, atributos, en_reporte_css)
 SELECT
     i.id,
     t.correlativo_css,
@@ -430,7 +431,8 @@ SELECT
     CASE WHEN t.fecha_cierre <= current_date THEN 'FINALIZADO' ELSE 'ACTIVO' END,
     t.fecha_inicio,
     t.fecha_cierre,
-    jsonb_strip_nulls(jsonb_build_object('area_css', t.area, 'alumnos_css', t.alumnos))
+    jsonb_strip_nulls(jsonb_build_object('area_css', t.area, 'alumnos_css', t.alumnos)),
+    t.en_reporte_css
 FROM tmp_projects t
 JOIN institutions i ON i.codigo_css = t.codigo_css
 ON CONFLICT (institution_id, correlativo_css) DO UPDATE
@@ -438,11 +440,14 @@ ON CONFLICT (institution_id, correlativo_css) DO UPDATE
         estado       = EXCLUDED.estado,
         fecha_inicio = EXCLUDED.fecha_inicio,
         fecha_cierre = EXCLUDED.fecha_cierre,
-        atributos    = projects.atributos || EXCLUDED.atributos
+        atributos    = projects.atributos || EXCLUDED.atributos,
+        -- Solo de false a true: un Excel que ya no trae el proyecto no borra la marca.
+        en_reporte_css = projects.en_reporte_css OR EXCLUDED.en_reporte_css
     WHERE (projects.titulo, projects.estado, projects.fecha_inicio, projects.fecha_cierre)
               IS DISTINCT FROM
           (EXCLUDED.titulo, EXCLUDED.estado, EXCLUDED.fecha_inicio, EXCLUDED.fecha_cierre)
-       OR NOT projects.atributos @> EXCLUDED.atributos;
+       OR NOT projects.atributos @> EXCLUDED.atributos
+       OR (EXCLUDED.en_reporte_css AND NOT projects.en_reporte_css);
 
 -- 5.5 Carreras de cada proyecto (según las carreras de sus estudiantes).
 INSERT INTO project_careers (project_id, career_id)
